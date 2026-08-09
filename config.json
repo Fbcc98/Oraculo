@@ -1,0 +1,31 @@
+{
+  "scraping_settings": {
+    "delay_min_seconds": 2,
+    "delay_max_seconds": 5,
+    "delay_min_match": 5,
+    "delay_max_match": 10,
+    "user_agent_default": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "ronda_objetivo": 3
+  },
+  "leagues": [
+    {
+      "name": "Premier League",
+      "country": "England",
+      "tournament_id": 17,
+      "seasons": [
+        {
+          "year": "26/27",
+          "season_id": 96668
+        },
+        {
+          "year": "25/26",
+          "season_id": 76986
+        },
+        {
+          "year": "24/25",
+          "season_id": 61627
+        }
+      ]
+    }
+  ]
+}
