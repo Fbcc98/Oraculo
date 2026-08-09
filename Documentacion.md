@@ -1,8 +1,93 @@
-# Diccionario de Datos y Modelo Lógico de Base de Datos
+# 1. Visión General del Proyecto
+
+## 1.1 Propósito del Proyecto:
+
+El proyecto "Oráculo" es una iniciativa de desarrollo de software destinada a la recolección, estructuración y análisis de estadísticas de fútbol. 
+Su propósito central es construir una herramienta automatizada que facilite la toma de decisiones estratégicas y basadas en datos dentro del ámbito 
+de las apuestas deportivas.
+
+A nivel personal, este sistema tiene un doble valor fundamental:
+
+* Valor Práctico y Emocional: Busca generar una fuente de ingresos adicional de manera metódica y controlada, con el fin de brindar apoyo 
+económico a mi familia y seres queridos.
+
+* Valor Educativo (Sandbox Técnico): Funciona como un entorno de pruebas real para consolidar y poner en práctica conocimientos avanzados 
+en Ingeniería de Software, Arquitectura de Datos (Web Scraping y automatización con Playwright), Modelamiento de Bases de Datos (SQLite/SQL) y 
+Ciencia de Datos (Machine Learning y análisis predictivo).
+
+## 1.2 Alcance:
+
+El alcance inicial del proyecto contempla el ciclo de vida completo de los datos (Pipeline ETL), dividido en tres grandes fases tecnológicas: 
+automatización de extracción (Web Scraping), almacenamiento relacional y análisis predictivo (Machine Learning).
+
+### 1. Dentro del Alcance:
+
+1. **Extracción de Datos**: Desarrollo de un motor de web scraping capaz de extraer el historial estadístico de partidos de forma automatizada.
+2. **Fuente Única de Verdad**: Los datos se obtendrán inicialmente de un único portal deportivo, seleccionando estratégicamente aquel 
+cuyas métricas y tiempos de actualización se alineen con los modelos utilizados por las casas de apuestas.
+3. **Arquitectura de Datos (ETL)**: Diseño e implementación de una Base de Datos Relacional para procesar, limpiar y almacenar las 
+estadísticas extraídas, permitiendo la generación de consultas e indicadores propios.
+4. **Modelo de Machine Learning**: En su fase final, el proyecto incluye el diseño y entrenamiento de un algoritmo predictivo para estimar 
+las condiciones generales de un partido (específicamente estadísticas de volumen, como overs de córneres, faltas o saques de banda), 
+sirviendo como apoyo para identificar apuestas de valor (Value Bets).
+
+### 2. Fuera del Alcance:
+
+Para acotar el desarrollo y evitar la expansión descontrolada del proyecto (*Scope Creep*), se establecen formalmente los siguientes límites:
+
+1. **Automatización Transaccional:** No incluye la colocación automatizada de apuestas (*Auto-betting*) ni la integración con plataformas de pago/casinos.
+2. **Frecuencia Temporal:** Exclusivamente pre-partido (*pre-match*). No contempla análisis en vivo ni procesamiento *in-play*.
+3. **Cobertida Deportiva y Geográfica:** Restringido a partidos de fútbol de las ligas europeas seleccionadas en la Etapa 1.
+4. **Lógica de Modelado:** Se excluye la predicción directa de resultados finales (Mercado 1X2). [cite_start]El enfoque es 100% probabilístico sobre eventos de volumen (córneres, faltas, saques de banda).
+5. **Scraping de Arbitraje:** No incluye scraping multifuente en paralelo para la búsqueda de *Surebets*.
+6. **Interfaz y Frontend:** No incluye el desarrollo de un Dashboard Web ni aplicación móvil; la interacción se realizará a nivel de consola y scripts ejecutables.
+
+## 1.3 Objetivos del Proyecto:
+
+### Objetivo general:
+
+Desarrollar un sistema automatizado de extracción de datos (Pipeline ETL) y un modelo predictivo de Machine Learning capaz de analizar 
+estadísticas históricas de fútbol, con el fin de proyectar escenarios de partido e identificar cuotas de valor (Value Bets) en los mercados deportivos.
+
+### Objetivos Específicos:
+
+El software tiene como objetivo predicir las estadísticas de los partidos:
+
+  1. Objetivo de Ingeniería de Datos: Construir un motor de web scraping y una base de datos relacional capaz de extraer, 
+limpiar y almacenar el 100% de las estadísticas clave de los partidos de las ligas seleccionadas de forma automatizada.
+  2. Objetivo de Predicción Conservadora (Bajo Riesgo): Entrenar un modelo de clasificación que logre predecir estadísticas 
+de volumen (ej. Over de córneres, saques de banda o faltas) con una tasa de acierto (Accuracy) igual o superior al 70%, sirviendo 
+como escudo financiero para la estrategia.
+  3. Objetivo de Predicción de Alto Riesgo: Desarrollar un algoritmo que logre identificar ineficiencias en cuotas de alto valor 
+(Hándicaps, resultados exactos), logrando un retorno de inversión (ROI) positivo a largo plazo, superando la probabilidad matemática 
+implícita de las casas de apuestas.
 
 ---
 
-## 1. Diccionario de Datos
+# 2. Especificación de Requisitos
+
+## 2.1. Requisitos Funcionales
+| ID | Nombre | Descripción |
+| :--- | :--- | :--- |
+| **RF-01** | Crawling de URLs | Extracción de enlaces de partidos por liga y temporada. |
+| **RF-02** | Interceptación API | Captura de respuestas JSON directamente de la red mediante Playwright. |
+| **RF-03** | Pipeline ETL | Limpieza, estructuración y filtrado de estadísticas cuantitativas de volumen. |
+| **RF-04** | Carga a BD | Inyección de datos transformados a SQLite (`oraculo.db`). |
+| **RF-05** | Modelo Predictivo | Estimación de probabilidades para eventos de volumen (córneres, faltas, etc.). |
+
+## 2.2. Requisitos No Funcionales
+| ID | Nombre | Descripción |
+| :--- | :--- | :--- |
+| **RNF-01** | Comportamiento Humano | Incorporación de pausas aleatorias para mitigar detección anti-scraping. |
+| **RNF-02** | Parametrización | Configuración centralizada vía `json/yaml` independiente del código. |
+| **RNF-03** | Portabilidad | Manejo de rutas relativas con `os.path` respecto a la raíz del proyecto. |
+| **RNF-04** | Integridad Referencial | Control estricto de claves foráneas en la base de datos relacional. |
+
+---
+
+# 3. Arquitectura del Sistema y Diseño
+
+## 3.1. Diccionario de Datos
 
 ### Entidad: PAIS
 > **Descripción:** Entidad maestra que almacena el catálogo de países registrados.
@@ -122,15 +207,15 @@
 
 ---
 
-## 2. Modelo Relacional No Gráfico
+## 3.2. Modelo Relacional No Gráfico
 
-### 1. Entidades Maestras
+### a. Entidades Maestras
 Son tablas independientes que sirven como catálogos base para el sistema.
 
 * **`PAIS`**: Es la entidad raíz geográfica. Se vincula con `LIGAS` y `EQUIPOS` mediante su clave primaria (`Id_pais`). 
   * **Cardinalidad:** `1:N` (un país puede albergar múltiples ligas y equipos).
 
-### 2. Entidades Intermedias / Catálogos Operativos
+### b. Entidades Intermedias / Catálogos Operativos
 Dependen de las entidades maestras y estructuran el marco competitivo.
 
 * **`LIGAS`**: Hereda la clave foránea `Id_pais`. Se vincula con `EQUIPOS` y `PARTIDOS` mediante su clave primaria (`Id_liga`). 
@@ -138,9 +223,22 @@ Dependen de las entidades maestras y estructuran el marco competitivo.
 * **`EQUIPOS`**: Hereda las claves foráneas `Id_liga` e `Id_pais`. Se vincula con `PARTIDOS` (como local y visitante) y con `PARTIDOS_ESTADISTICAS` mediante su clave primaria (`Id_equipo`). 
   * **Cardinalidad:** `1:N` por cada rol (local/visitante).
 
-### 3. Entidades de Flujo Transaccional y Control Operativo
+### c. Entidades de Flujo Transaccional y Control Operativo
 Registran los eventos reales y el volumen de datos analíticos.
 
-* **`PARTIDOS`**: Representa cada encuentro deportivo. Hereda la clave foránea `Id_liga` y se conecta a `EQUIPOS` mediante dos claves foráneas (`Id_equipo_local` e `Id_equipo_visita`). Se relaciona con `PARTIDOS_ESTADISTICAS` a través de su clave primaria (`Id_partido`).
+* **`PARTIDOS`**: Representa cada encuentro deportivo. Hereda la clave foránea `Id_liga` y se conecta a `EQUIPOS` mediante dos claves foráneas 
+(`Id_equipo_local` e `Id_equipo_visita`). Se relaciona con `PARTIDOS_ESTADISTICAS` a través de su clave primaria (`Id_partido`).
   * **Cardinalidad:** `1:N` (un partido genera múltiples registros de estadísticas).
-* **`PARTIDOS_ESTADISTICAS`**: Entidad analítica granular. Hereda las claves foráneas `Id_partido` e `Id_equipo`. Posee una clave primaria compuesta formada por `(Id_partido, Id_equipo, Periodo)`, lo que garantiza la unicidad e integridad de los datos de rendimiento para un equipo y período específico en cada partido.
+* **`PARTIDOS_ESTADISTICAS`**:Entidad analítica granular. Hereda las claves foráneas `Id_partido` e `Id_equipo`. 
+Posee una clave primaria compuesta formada por `(Id_partido, Id_equipo, Periodo)`, lo que garantiza la unicidad e integridad de los datos de rendimiento para un equipo y período específico en cada partido.
+
+# 4. Roadmap y Planificación por Etapas
+
+El desarrollo del Proyecto "Oráculo" se ejecutará bajo un enfoque iterativo e incremental, dividido en cuatro grandes fases. 
+Esto garantiza la entrega de valor temprano (MVP) antes de escalar hacia modelos predictivos complejos.
+
+# 5. Estrategia de Pruebas y Calidad
+
+# 6. Gestión de Riesgos y Mitigación
+
+# 7. Estándares y Convenciones de Código
