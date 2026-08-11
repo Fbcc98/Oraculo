@@ -3,20 +3,16 @@ import os
 import json
 import logging
 
-# 1. Configuración de rutas
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(base_dir)
 
-# 2. Importaciones de tus módulos utilitarios
 from utils.json_reader import load_config
 from utils.base import random_sleep
 from utils.logger import setup_logger  # <--- Importamos nuestro nuevo módulo
 from playwright.sync_api import sync_playwright
 
-# 3. Inicializamos el logger centralizado
 setup_logger()
 
-# Asegurarnos de que exista la carpeta data/
 data_dir = os.path.join(base_dir, 'data', 'urls_league_rounds')
 os.makedirs(data_dir, exist_ok=True)
 
@@ -62,13 +58,11 @@ def run_url_explorer():
 
                 logging.info("Buscando y cerrando banners de cookies/publicidad...")
 
-                # 2. Selección dinámica de la Ronda
                 try:
                     logging.info("Localizando el combobox de Rondas en el DOM...")
 
                     random_sleep(settings['delay_min_seconds'], settings['delay_max_seconds'])
 
-                    # Selector robusto implementado
                     btn_ronda = page.get_by_role("combobox", name="Select item in event list")
                     btn_ronda.wait_for(state="visible", timeout=15000)
                     logging.info("Combobox 'btn_ronda' localizado.")
@@ -92,14 +86,12 @@ def run_url_explorer():
                     logging.info("Saltando a la siguiente temporada...")
                     continue
 
-                # 3. Extracción de URLs del DOM
                 try:
                     logging.info("Buscando enlaces de partidos dentro del contenedor de la ronda...")
                     contenedor_ronda = page.locator('#tabpanel-round')
                     enlaces_elementos = contenedor_ronda.locator('a[href*="/match/"]').all()
 
                     if not enlaces_elementos:
-                        # Plan de respaldo por si el ID del tab panel varía ligeramente entre ligas
                         logging.warning("No se encontró el contenedor '#tabpanel-round', buscando de forma acotada...")
                         enlaces_elementos = page.locator(
                             'div[class*="unique-tournament"] ~ a[href*="/match/"], a.d_block[href*="/match/"]').all()
@@ -123,7 +115,6 @@ def run_url_explorer():
                     logging.error(f"Fallo al extraer los enlaces del DOM: {e}")
                     continue
 
-                # 4. Guardado en JSON
                 try:
                     if urls_extraidas:
                         logging.info("Escribiendo datos en archivo JSON...")

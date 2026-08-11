@@ -192,6 +192,30 @@
                             "key": "shotsOnGoal"
                         },
                         {
+                            "name": "Expected goals",
+                            "home": "0.45",
+                            "away": "2.65",
+                            "compareCode": 2,
+                            "statisticsType": "positive",
+                            "valueType": "event",
+                            "homeValue": 0.45,
+                            "awayValue": 2.65,
+                            "renderType": 1,
+                            "key": "expectedGoals"
+                        },
+                        {
+                            "name": "Expected goals on target",
+                            "home": "0.24",
+                            "away": "2.35",
+                            "compareCode": 2,
+                            "statisticsType": "positive",
+                            "valueType": "event",
+                            "homeValue": 0.24,
+                            "awayValue": 2.35,
+                            "renderType": 1,
+                            "key": "expectedGoalsOnTarget"
+                        },
+                        {
                             "name": "Hit woodwork",
                             "home": "0",
                             "away": "0",
@@ -774,6 +798,30 @@
                             "key": "shotsOnGoal"
                         },
                         {
+                            "name": "Expected goals",
+                            "home": "0.31",
+                            "away": "0.09",
+                            "compareCode": 1,
+                            "statisticsType": "positive",
+                            "valueType": "event",
+                            "homeValue": 0.31,
+                            "awayValue": 0.09,
+                            "renderType": 1,
+                            "key": "expectedGoals"
+                        },
+                        {
+                            "name": "Expected goals on target",
+                            "home": "0.24",
+                            "away": "0.00",
+                            "compareCode": 1,
+                            "statisticsType": "positive",
+                            "valueType": "event",
+                            "homeValue": 0.24,
+                            "awayValue": 0,
+                            "renderType": 1,
+                            "key": "expectedGoalsOnTarget"
+                        },
+                        {
                             "name": "Hit woodwork",
                             "home": "0",
                             "away": "0",
@@ -1292,6 +1340,30 @@
                             "awayValue": 5,
                             "renderType": 1,
                             "key": "shotsOnGoal"
+                        },
+                        {
+                            "name": "Expected goals",
+                            "home": "0.15",
+                            "away": "2.56",
+                            "compareCode": 2,
+                            "statisticsType": "positive",
+                            "valueType": "event",
+                            "homeValue": 0.15,
+                            "awayValue": 2.56,
+                            "renderType": 1,
+                            "key": "expectedGoals"
+                        },
+                        {
+                            "name": "Expected goals on target",
+                            "home": "0.00",
+                            "away": "2.35",
+                            "compareCode": 2,
+                            "statisticsType": "positive",
+                            "valueType": "event",
+                            "homeValue": 0,
+                            "awayValue": 2.35,
+                            "renderType": 1,
+                            "key": "expectedGoalsOnTarget"
                         },
                         {
                             "name": "Hit woodwork",

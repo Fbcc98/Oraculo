@@ -1,4 +1,3 @@
-import json
 
 def limpiar_valor(valor_str, tipo_dato):
     """
@@ -21,22 +20,19 @@ def limpiar_valor(valor_str, tipo_dato):
         else:
             return valor_str
     except ValueError:
-        return 0  # Valor por defecto en caso de que venga un "-" o esté vacío
+        return 0
 
 
 def procesar_estadisticas_partido(json_data, id_partido, id_equipo_local, id_equipo_visita):
 
     estadisticas_db = []
 
-    # Recorremos los distintos períodos (ALL, 1ST, 2ST)
     for periodo_data in json_data.get('statistics', []):
         periodo = periodo_data.get('period')
 
-        # Diccionarios base para almacenar las stats de este período
         stats_local = {'Id_partido': id_partido, 'Id_equipo': id_equipo_local, 'Periodo': periodo}
         stats_visita = {'Id_partido': id_partido, 'Id_equipo': id_equipo_visita, 'Periodo': periodo}
 
-        # Iteramos sobre los grupos de estadísticas (Match overview, etc.)
         for grupo in periodo_data.get('groups', []):
             for item in grupo.get('statisticsItems', []):
                 nombre_stat = item.get('key')

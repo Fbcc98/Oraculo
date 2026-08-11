@@ -4,12 +4,12 @@ import os
 def crear_base_datos():
 
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    DB_PATH = os.path.join(BASE_DIR, "db", "oraculo.db")
+    DB_PATH = os.path.join(BASE_DIR, "database", "oraculo.database")
 
     conexion = sqlite3.connect(DB_PATH)
     cursor = conexion.cursor()
 
-    print("Conectado a la base de datos oraculo.db")
+    print("Conectado a la base de datos oraculo.database")
 
     query_crear_tabla = """
     

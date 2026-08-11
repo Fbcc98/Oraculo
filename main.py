@@ -1,73 +1,85 @@
 import os
-from scrapers.script_rounds import run_url_explorer
-from scrapers.script_match_stats import procesar_archivo_ronda
 
-# Configuramos la ruta hacia la carpeta donde se guardan tus JSON
+from etl.schema_explorer import elegir_carpeta, explorar_carpeta
+from scrapers.match_crawler import run_url_explorer
+from scrapers.stats_scraper import procesar_archivo_ronda
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-INPUT_FOLDER = os.path.join(BASE_DIR, 'data', 'urls_league_rounds')
+INPUT_FOLDER = os.path.join(BASE_DIR, "data", "urls_league_rounds")
 
 def mostrar_menu():
     print("\n" + "=" * 45)
-    print(" 🔮 ORÁCULO - MOTOR DE RECOLECCIÓN 🔮")
+    print("  ORÁCULO - MOTOR DE RECOLECCIÓN")
     print("=" * 45)
-    print("  1. 🌐 Ejecutar Explorador de URLs (Etapa 1)")
-    print("  2. 📊 Extraer Estadísticas (Etapa 2)")
-    print("  0. ❌ Salir del sistema")
+    print("  1. Ejecutar Explorador de URLs (Etapa 1)")
+    print("  2. Extraer Estadísticas y Alineaciones (Etapa 2)")
+    print("  3. Explorar esquemas de JSON")
+    print("  0. Salir del sistema")
     print("=" * 45)
+
+def seleccionar_archivo_ronda():
+    """Permite elegir el archivo de URLs que procesará el scraper."""
+    if not os.path.exists(INPUT_FOLDER):
+        print("\nLa carpeta de datos no existe aún. Ejecuta la Etapa 1 primero.")
+        return None
+
+    archivos = sorted(
+        archivo for archivo in os.listdir(INPUT_FOLDER) if archivo.endswith(".json")
+    )
+
+    if not archivos:
+        print("\nNo hay archivos JSON disponibles. Ejecuta la Etapa 1 primero.")
+        return None
+
+    print("\nArchivos disponibles:")
+    for indice, archivo in enumerate(archivos, start=1):
+        print(f"  {indice}. {archivo}")
+    print("  c. Cancelar y volver al menú principal")
+
+    seleccion = input(
+        f"\nElige el archivo a procesar (1-{len(archivos)}): "
+    ).strip().lower()
+
+    if seleccion == "c":
+        return None
+
+    try:
+        indice = int(seleccion) - 1
+        return archivos[indice]
+    except (ValueError, IndexError):
+        print("\nEntrada inválida. Debes ingresar un número dentro del rango.")
+        return None
+
 
 def main():
     while True:
         mostrar_menu()
-        opcion = input("\nSelecciona una opción (0-2): ").strip()
+        opcion = input("\nSelecciona una opción (0-3): ").strip()
 
-        if opcion == '1':
-            print("\n▶ Iniciando Explorador de URLs...")
+        if opcion == "1":
+            print("\nIniciando Explorador de URLs...")
             run_url_explorer()
 
-        elif opcion == '2':
-            print("\n▶ Preparando extracción de estadísticas...")
+        elif opcion == "2":
+            print("\nPreparando extracción de estadísticas y alineaciones...")
+            archivo_elegido = seleccionar_archivo_ronda()
 
-            # Verificamos si la carpeta existe
-            if not os.path.exists(INPUT_FOLDER):
-                print("\n❌ La carpeta de datos no existe aún. Ejecuta la Etapa 1 primero.")
-                continue
+            if archivo_elegido:
+                print(f"\nEjecutando Etapa 2 para: {archivo_elegido}")
+                procesar_archivo_ronda(archivo_elegido)
 
-            # Buscamos todos los archivos JSON en la carpeta
-            archivos = [f for f in os.listdir(INPUT_FOLDER) if f.endswith('.json')]
+        elif opcion == "3":
+            print("\nExplorador de esquemas JSON")
+            carpeta_elegida = elegir_carpeta()
+            explorar_carpeta(carpeta_elegida)
 
-            if not archivos:
-                print("\n❌ No hay archivos JSON disponibles. Ejecuta la Etapa 1 primero.")
-                continue
-
-            # Mostramos el sub-menú dinámico con los archivos
-            print("\n📂 Archivos disponibles:")
-            for i, archivo in enumerate(archivos, 1):
-                print(f"  {i}. {archivo}")
-
-            print("  c. Cancelar y volver al menú principal")
-
-            seleccion = input(f"\nElige el archivo a procesar (1-{len(archivos)}): ").strip().lower()
-
-            if seleccion == 'c':
-                continue
-
-            try:
-                indice = int(seleccion) - 1
-                if 0 <= indice < len(archivos):
-                    archivo_elegido = archivos[indice]
-                    print(f"\n▶ Ejecutando Etapa 2 para: {archivo_elegido}")
-                    procesar_archivo_ronda(archivo_elegido)
-                else:
-                    print("\n❌ Número fuera de rango. Intenta nuevamente.")
-            except ValueError:
-                print("\n❌ Entrada inválida. Debes ingresar un número.")
-
-        elif opcion == '0':
+        elif opcion == "0":
             print("\nCerrando Oráculo. ¡Hasta pronto!\n")
             break
 
         else:
-            print("\n❌ Opción no válida. Por favor, selecciona 0, 1 o 2.")
+            print("\nOpción no válida. Por favor, selecciona 0, 1, 2 o 3.")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
