@@ -87,9 +87,85 @@ implícita de las casas de apuestas.
 
 # 3. Arquitectura del Sistema y Diseño
 
-## 3.1. Diccionario de Datos
+## 3.1 Arquitectura de Carpetas y Módulos.
 
-### Entidad: PAIS
+El proyecto "Oráculo" sigue un diseño modular. Esto permite separar las responsabilidades (extracción, transformación, 
+base de datos y configuración) para que el código sea mantenible, escalable y a prueba de errores. 
+
+La estructura de directorios del proyecto se organiza de la siguiente manera:
+
+```text
+oraculo_project/
+│
+├── main.py                  # "Director de Orquesta": Punto de entrada único que orquesta los scripts.
+├── config.json              # Archivo de configuración (rutas, parámetros de ligas, temporadas).
+│
+├── scrapers/                # Módulo de Extracción (Web Scraping)
+│   ├── match_crawler.py     # Navega por el DOM y extrae las URLs/IDs de los partidos de la liga por rondas.
+│   └── stats_scraper.py     # Intercepta el tráfico de red con Playwright y descarga los JSON de estadísticas.
+│
+├── etl/                     # Módulo de Transformación (Procesamiento de Datos)
+│   ├── json_processor.py    # Itera sobre la carpeta de descargas para aplanar los JSON.
+│   └── data_cleaner.py      # Utiliza Pandas para limpiar, castear tipos y estructurar los DataFrames.
+│
+├── database/                # Módulo de Carga y Modelado (Base de Datos)
+│   ├── crear_db.py          # Script DDL (Data Definition Language) para inicializar tablas y FKs (SQLite).
+│   └── db_manager.py        # Gestiona la conexión e inyecta los datos limpios (ej. mediante .to_sql()).
+│
+├── utils/                   # Herramientas Transversales compartidas por todos los módulos
+│   ├── base.py              # Funciones auxiliares genéricas (ej. random_sleep() para scraping ético).
+│   ├── logger.py            # Configuración de los logs de ejecución del sistema.
+│   └── json_reader.py       # Utilidades para cargar parámetros del config.json.
+│
+├── ml_models                # Carpeta par almacenar los modelos de machine learning para consuman la database
+│
+└── data/                    # Almacenamiento local temporal (Ignorado en repositorios git)
+    ├── matchs_stats/           # Archivos JSON crudos de estadisticas de los partidos.
+    └── urls_league_rounds/     # Archivos JSON generados para almacenar las urls de los partidos por rondas.
+```
+
+
+## 3.2 Pipeline de Datos.
+
+El flujo de vida de los datos sigue un proceso clásico de Ingeniería de Datos ETL (Extracción, Transformación y Carga), 
+diseñado para ejecutarse de manera secuencial y automatizada:
+
+### Fase 1: Extracción (Extract)
+* Herramientas: Python + Playwright.
+
+* Proceso: El orquestador (main.py) invoca a los scrapers. Utilizando Playwright, el bot navega como un humano (aplicando 
+pausas tácticas con random_sleep), hace clic en las pestañas de estadísticas y escucha el tráfico de red (Network Interception) 
+para atrapar directamente las respuestas JSON de la API oculta del servidor (ej. Sofascore).
+
+* Salida: Archivos unitarios .json por cada partido guardados en data/raw_jsons/.
+
+### Fase 2: Transformación (Transform)
+* Herramientas: Python + Pandas.
+
+* Proceso: El módulo ETL lee los JSON crudos almacenados. Aísla los bloques clave (filtrando por partido completo 'ALL' o 
+tiempos '1ST'/'2ST'). A continuación, a través de DataFrames de Pandas, se limpian los datos: se eliminan símbolos basura 
+(como % o km), se castean variables a números flotantes o enteros, y se renuevan las claves para que coincidan con los atributos de la base de datos.
+
+* Salida: Estructuras de datos (DataFrames) limpias, normalizadas y listas para relacionarse.
+
+### Fase 3: Carga (Load)
+* Herramientas: Python + SQLite (vía SQLAlchemy o conector nativo).
+
+* Proceso: Se inicializa la base de datos ejecutando crear_db.py (asegurando PRAGMA foreign_keys = ON). Posteriormente, se 
+inyectan los DataFrames limpios a las tablas correspondientes respetando la jerarquía relacional estricta: 
+PAIS -> LIGAS -> EQUIPOS -> PARTIDOS -> ESTADISTICAS_PARTIDO.
+
+* Salida: Base de datos relacional robusta, con historiales de partidos listos para ser consultados mediante SQL.
+
+### Fase 4: Consumo (Machine Learning - Trabajo Futuro)
+* Proceso: Una vez el pipeline ETL estabilicé la base de datos, los modelos predictivos (Clasificación/Regresión) leerán 
+directamente de las tablas para encontrar Value Bets e ineficiencias de cuotas en las estadísticas de volumen (córneres, saques de banda, faltas).
+
+## 3.3 Modelo de Datos 
+
+### Diccionario de Datos
+
+#### Entidad: PAIS
 > **Descripción:** Entidad maestra que almacena el catálogo de países registrados.
 
 | Atributo | Tipo de datos | Tipo de clave | Límite de caracteres | Nulo |
@@ -99,7 +175,7 @@ implícita de las casas de apuestas.
 
 ---
 
-### Entidad: LIGAS
+#### Entidad: LIGAS
 > **Descripción:** Catálogo de competiciones o ligas asociadas a un país.
 
 | Atributo | Tipo de datos | Tipo de clave | Límite de caracteres | Nulo |
@@ -112,7 +188,7 @@ implícita de las casas de apuestas.
 
 ---
 
-### Entidad: EQUIPOS
+#### Entidad: EQUIPOS
 > **Descripción:** Entidad que representa a los clubes y selecciones.
 
 | Atributo | Tipo de datos | Tipo de clave | Límite de caracteres | Nulo |
@@ -124,7 +200,39 @@ implícita de las casas de apuestas.
 
 ---
 
-### Entidad: PARTIDOS
+#### Entidad: JUGADORES
+> **Descripción:** Entidad que representa a los jugadores.
+
+| Atributo               | Tipo de datos | Tipo de clave | Límite de caracteres | Nulo |
+|:-----------------------|:--------------|:--------------|:---------------------| :--- |
+| **Id_jugador**         | `SMALLINT`    | **PK**        | 10                   | No |
+| **Nombre_jugador**     | `VARCHAR`     | Ninguna       | 50                   | No |
+| **Id_equipo**          | `SMALLINT`    | **FK**        | 10                   | No |
+| **Id_pais**            | `TINYINT`     | **FK**        | 10                   | No |
+| **Estatura**           | `TINYINT`     | **Ninguna**   | 10                   | No |
+| **Fecha_Nacimiento**   | `DATE`        | **Ninguna**   | 10                   | No |
+| **Genero**             | `VARCHAR`     | **Ninguna**   | 10                   | No |
+| **Posicion_principal** | `VARCHAR`     | **Ninguna**   | 10                   | No |
+
+---
+
+#### Entidad: ALINEACION
+> **Descripción:** Entidad que representa la alineacion y posicion de los jugadores en el partidos.
+
+| Atributo             | Tipo de datos | Tipo de clave | Límite de caracteres | Nulo |
+|:---------------------|:--------------|:--------------|:---------------------| :--- |
+| **Id_jugador**       | `SMALLINT`    | **PK**        | 10                   | No |
+| **Id_partido**       | `SMALLINT`    | **PK**        | 50                   | No |
+| **Id_equipo**        | `SMALLINT`    | **FK**        | 10                   | No |
+| **Titular**          | `TINYINT`     | **FK**        | 10                   | No |
+| **Suplente**         | `TINYINT`     | **Ninguna**   | 10                   | No |
+| **Posicion_partido** | `DATE`        | **Ninguna**   | 10                   | No |
+| **Dorsal**           | `VARCHAR`     | **Ninguna**   | 10                   | No |
+| **Formacion**        | `VARCHAR`     | **Ninguna**   | 10                   | No |
+
+---
+
+#### Entidad: PARTIDOS
 > **Descripción:** Entidad transaccional que registra los enfrentamientos deportivos.
 
 | Atributo | Tipo de datos | Tipo de clave | Límite de caracteres | Nulo |
@@ -140,7 +248,75 @@ implícita de las casas de apuestas.
 
 ---
 
-### Entidad: PARTIDOS_ESTADISTICAS
+#### Entidad: JUGADORES_ESTADISTICAS
+> **Descripción:** Entidad analitica que almacena el rendimiento de los jugadores
+
+| Atributo                                       | Tipo de datos | Tipo de clave | Límite de caracteres | Nulo |
+|:-----------------------------------------------|:--------------| :--- | :--- | :--- |
+| **Id_jugador**                                 | `INT`         | **PK / FK** | 10 | No |
+| **Id_partido**                                 | `INT`         | **PK / FK** | 10 | No |
+| **Id_equipo**                                  | `SMALLINT`    | **PK / FK** | 10 | No |
+| **Minutos_jugados**                            | `TINYINT`     | Ninguna | N/A | No |
+| **Condicion_local**                            | `BOOLEAN`     | Ninguna | N/A | No |
+| **Posesion_balon**                             | `DECIMAL`     | Ninguna | N/A | Sí |
+| **Distancia_recorrida_km**                     | `DECIMAL`     | Ninguna | N/A | Sí |
+| **Goles_esperados_xG**                         | `DECIMAL`     | Ninguna | N/A | Sí |
+| **Grandes_ocasiones**                          | `TINYINT`     | Ninguna | N/A | Sí |
+| **Sprints**                                    | `SMALLINT`    | Ninguna | N/A | Sí |
+| **Corners**                                    | `TINYINT`     | Ninguna | N/A | Sí |
+| **Faltas**                                     | `TINYINT`     | Ninguna | N/A | Sí |
+| **Pases**                                      | `SMALLINT`    | Ninguna | N/A | Sí |
+| **Entradas**                                   | `TINYINT`     | Ninguna | N/A | Sí |
+| **Tiros_libres**                               | `TINYINT`     | Ninguna | N/A | Sí |
+| **Tarjetas_amarillas**                         | `TINYINT`     | Ninguna | N/A | Sí |
+| **Tarjetas_rojas**                             | `TINYINT`     | Ninguna | N/A | Sí |
+| **Remates**                                    | `TINYINT`     | Ninguna | N/A | Sí |
+| **Tiros_arco**                                 | `TINYINT`     | Ninguna | N/A | Sí |
+| **Tiros_al_palo**                              | `TINYINT`     | Ninguna | N/A | Sí |
+| **Tiros_fuera**                                | `TINYINT`     | Ninguna | N/A | Sí |
+| **Tiros_bloqueados**                           | `TINYINT`     | Ninguna | N/A | Sí |
+| **Tiros_adentro_del_area**                     | `TINYINT`     | Ninguna | N/A | Sí |
+| **Tiros_afuera_del_area**                      | `TINYINT`     | Ninguna | N/A | Sí |
+| **Ocasiones_claras_realizadas**                | `TINYINT`     | Ninguna | N/A | Sí |
+| **Ocasiones_claras_falladas**                  | `TINYINT`     | Ninguna | N/A | Sí |
+| **Toques_dentro_del_area**                     | `TINYINT`     | Ninguna | N/A | Sí |
+| **Faltas_recibidas_ultima_tercio**             | `TINYINT`     | Ninguna | N/A | Sí |
+| **Fueras_de_juego**                            | `TINYINT`     | Ninguna | N/A | Sí |
+| **Pases_precisos**                             | `SMALLINT`    | Ninguna | N/A | Sí |
+| **Saques_de_banda**                            | `TINYINT`     | Ninguna | N/A | Sí |
+| **Pases_al_ultimo_tercio**                     | `SMALLINT`    | Ninguna | N/A | Sí |
+| **Total_pases_area_penal_adversaria**          | `SMALLINT`    | Ninguna | N/A | Sí |
+| **Total_pases_precisos_area_penal_adversaria** | `SMALLINT`    | Ninguna | N/A | Sí |
+| **Total_balones_largos**                       | `SMALLINT`    | Ninguna | N/A | Sí |
+| **Total_balones_largos_precisos**              | `SMALLINT`    | Ninguna | N/A | Sí |
+| **Total_centros**                              | `TINYINT`     | Ninguna | N/A | Sí |
+| **Total_centros_exitosos**                     | `TINYINT`     | Ninguna | N/A | Sí |
+| **Porcentaje_duelos_ganados**                  | `DECIMAL`     | Ninguna | N/A | Sí |
+| **Balones_perdidos**                           | `TINYINT`     | Ninguna | N/A | Sí |
+| **Total_duelos_suelo**                         | `SMALLINT`    | Ninguna | N/A | Sí |
+| **Total_duelos_suelo_ganados**                 | `SMALLINT`    | Ninguna | N/A | Sí |
+| **Total_duelos_aereos**                        | `SMALLINT`    | Ninguna | N/A | Sí |
+| **Total_duelos_aereos_ganados**                | `SMALLINT`    | Ninguna | N/A | Sí |
+| **Total_regates**                              | `TINYINT`     | Ninguna | N/A | Sí |
+| **Total_regates_ganados**                      | `TINYINT`     | Ninguna | N/A | Sí |
+| **Total_entradas**                             | `TINYINT`     | Ninguna | N/A | Sí |
+| **Total_entradas_ganadas**                     | `TINYINT`     | Ninguna | N/A | Sí |
+| **Porcentaje_entradas_ganadas**                | `DECIMAL`     | Ninguna | N/A | Sí |
+| **Intercepciones**                             | `TINYINT`     | Ninguna | N/A | Sí |
+| **Recuperaciones**                             | `TINYINT`     | Ninguna | N/A | Sí |
+| **Despejes**                                   | `TINYINT`     | Ninguna | N/A | Sí |
+| **Errores_terminan_tiro**                      | `TINYINT`     | Ninguna | N/A | Sí |
+| **Errores_terminan_gol**                       | `TINYINT`     | Ninguna | N/A | Sí |
+| **Atajadas**                                   | `TINYINT`     | Ninguna | N/A | Sí |
+| **Goles_evitados**                             | `DECIMAL`     | Ninguna | N/A | Sí |
+| **Grandes_atajadas**                           | `TINYINT`     | Ninguna | N/A | Sí |
+| **Balones_aereos_atrapados**                   | `TINYINT`     | Ninguna | N/A | Sí |
+| **Despejes_punos**                             | `TINYINT`     | Ninguna | N/A | Sí |
+| **Saques_de_arco**                             | `TINYINT`     | Ninguna | N/A | Sí |
+
+---
+
+#### Entidad: PARTIDOS_ESTADISTICAS
 > **Descripción:** Entidad analítica granular de rendimiento por equipo y período.
 
 | Atributo                                       | Tipo de datos | Tipo de clave | Límite de caracteres | Nulo |
@@ -207,15 +383,15 @@ implícita de las casas de apuestas.
 
 ---
 
-## 3.2. Modelo Relacional No Gráfico
+### 3.2. Modelo Relacional No Gráfico
 
-### a. Entidades Maestras
+#### a. Entidades Maestras
 Son tablas independientes que sirven como catálogos base para el sistema.
 
 * **`PAIS`**: Es la entidad raíz geográfica. Se vincula con `LIGAS` y `EQUIPOS` mediante su clave primaria (`Id_pais`). 
   * **Cardinalidad:** `1:N` (un país puede albergar múltiples ligas y equipos).
 
-### b. Entidades Intermedias / Catálogos Operativos
+#### b. Entidades Intermedias / Catálogos Operativos
 Dependen de las entidades maestras y estructuran el marco competitivo.
 
 * **`LIGAS`**: Hereda la clave foránea `Id_pais`. Se vincula con `EQUIPOS` y `PARTIDOS` mediante su clave primaria (`Id_liga`). 
@@ -223,7 +399,7 @@ Dependen de las entidades maestras y estructuran el marco competitivo.
 * **`EQUIPOS`**: Hereda las claves foráneas `Id_liga` e `Id_pais`. Se vincula con `PARTIDOS` (como local y visitante) y con `PARTIDOS_ESTADISTICAS` mediante su clave primaria (`Id_equipo`). 
   * **Cardinalidad:** `1:N` por cada rol (local/visitante).
 
-### c. Entidades de Flujo Transaccional y Control Operativo
+#### c. Entidades de Flujo Transaccional y Control Operativo
 Registran los eventos reales y el volumen de datos analíticos.
 
 * **`PARTIDOS`**: Representa cada encuentro deportivo. Hereda la clave foránea `Id_liga` y se conecta a `EQUIPOS` mediante dos claves foráneas 
