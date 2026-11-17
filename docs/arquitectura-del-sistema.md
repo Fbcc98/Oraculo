@@ -1,0 +1,556 @@
+# Arquitectura del Sistema y Diseño Técnico
+
+## Índice de Navegación
+
+1. [Visión Arquitectónica General](#1-visión-arquitectónica-general)
+2. [Estructura de Directorios del Proyecto](#2-estructura-de-directorios-del-proyecto)
+3. [Flujo General de Componentes y Orquestación (`../main.py`)](#3-flujo-general-de-componentes-y-orquestación-mainpy)
+4. [Detalle Técnico — Área 1: Scraping](#4-detalle-técnico--área-1-scraping)
+5. [Módulos Transversales y Herramientas de Soporte](#5-módulos-transversales-y-herramientas-de-soporte)
+6. [Detalle Técnico — Área 2: ETL y Persistencia DDL](#6-detalle-técnico--área-2-etl-y-persistencia-ddl)
+7. [Detalle Técnico — Área 3: Machine Learning (Visión Futura)](#7-detalle-técnico--área-3-machine-learning-visión-futura)
+
+---
+
+## 1. Visión Arquitectónica General
+
+El sistema **Oráculo** está diseñado bajo una arquitectura modular desacoplada orientada al flujo de datos (*Data-Driven Architecture*). Aunque el desarrollo se ejecuta de manera iterativa por fases (priorizando actualmente el MVP de extracción y carga piloto en SQLite), la estructura global del software se sostiene sobre **tres grandes áreas funcionales**:
+
+1. **Módulo de Extracción (Scraping):** Automatiza la navegación web y la captura de datos crudos desde la fuente deportiva (Sofascore), persistiendo respuestas JSON inmutables en disco (`../data/raw`).
+2. **Módulo de Procesamiento y Almacenamiento (ETL y DDL):** Lee los archivos JSON crudos, valida reglas de negocio, normaliza estructuras en diccionarios nativos de Python y carga la información mediante transacciones atómicas (`UPSERT`) respetando la integridad referencial en SQLite (`../database/oraculo.db`).
+3. **Módulo de Analítica Predictiva (Machine Learning - Fase Futura):** Consumirá exclusivamente la base de datos relacional consolidada para entrenar modelos probabilísticos (estadísticas de volumen como córneres, faltas y saques de banda) sin acoplarse a la lógica de extracción.
+
+```mermaid
+flowchart LR
+    CFG[config.json] --> MAIN[main.py\nOrquestador CLI]
+    MAIN --> SCR[1. Scraping\nPlaywright]
+    SCR -->|JSONs Crudos| RAW[(data/raw/\nStaging Area)]
+    RAW --> ETL[2. Pipeline ETL\nPython / SQLite]
+    ETL -->|Transacciones ACID| DB[(oraculo.db\nSQLite)]
+    DB -.->|Lectura Histórica\nFase Futura| ML[3. Machine Learning\nml_models/]
+```
+
+---
+
+## 2. Estructura de Directorios del Proyecto
+
+La organización física del código separa responsabilidades para evitar dependencias circulares y facilitar la trazabilidad:
+
+```text
+oraculo_project/
+│
+├── main.py                      # Orquestador CLI (menú interactivo, flags argparse y puente Raw -> ETL).
+├── config.json                  # Parámetros globales (ligas, temporadas, ronda objetivo, delays).
+│
+├── scrapers/                    # Área 1: Extracción de datos (Web Scraping + API)
+│   ├── match_crawler.py         # Descubre URLs de partidos por ronda y descarga eventos de temporada.
+│   └── stats_scraper.py         # Extrae alineaciones, entrenadores y estadísticas por partido.
+│
+├── etl/                         # Área 2: Transformación y Carga Transaccional
+│   ├── pipeline.py              # Coordina validaciones, procesadores y carga transaccional.
+│   ├── match_processor.py       # Normaliza metadatos de eventos y estadísticas de equipo por período.
+│   ├── player_processor.py      # Normaliza alineaciones, jugadores y rendimiento individual.
+│   ├── manager_processor.py     # Extrae y vincula directores técnicos.
+│   ├── loader.py                # Persiste entidades en SQLite mediante UPSERT atómico.
+│   └── common.py                # Utilidades estáticas de conversión y sanitización de tipos.
+│
+├── database/                    # Modelado DDL y almacenamiento relacional
+│   ├── crear_db.py              # Script DDL (11 tablas, 5 índices, FKs y migración defensiva).
+│   └── oraculo.db               # Base de datos SQLite generada en ejecución.
+│
+├── ml_models/                   # Área 3: Modelos predictivos (Trabajo futuro)
+│
+├── utils/                       # Utilidades transversales y diagnóstico
+│   ├── base.py                  # Pausas aleatorias (random_sleep) para scraping ético.
+│   ├── json_reader.py           # Lectura segura de config.json.
+│   ├── logger.py                # Configuración centralizada de bitácoras (logs).
+│   └── schema_explorer.py       # Herramienta CLI de diagnóstico para auditar JSONs crudos.
+│
+└── data/                        # Almacenamiento local de datos (ignorado en Git)
+    └── raw/                     # Capa de datos crudos (Landing Zone)
+        ├── urls_league_rounds/  # Listados de URLs de partidos por liga/temporada/ronda.
+        ├── league_events/       # Instantáneas JSON de eventos totales de temporada.
+        ├── matchs_stats/        # Estadísticas colectivas por partido.
+        ├── players_stats/       # Alineaciones y estadísticas individuales.
+        └── managers/            # Directores técnicos por partido.
+```
+
+---
+
+## 3. Flujo General de Componentes y Orquestación (`../main.py`)
+
+El siguiente diagrama ilustra la interacción completa entre el punto de entrada (`../main.py`), los módulos de extracción, el puente hacia el ETL y la base de datos SQLite:
+
+```mermaid
+flowchart TD
+    Main[main.py\nMenú + CLI argparse] -->|Lee parámetros| Config[(config.json)]
+    
+    subgraph Area1 [Área 1: Scraping]
+        MC[scrapers/match_crawler.py]
+        SS[scrapers/stats_scraper.py]
+    end
+
+    subgraph StorageRaw [Almacenamiento Crudo - data/raw/]
+        UrlsJSON[(urls_*.json)]
+        EventsJSON[(team_events_total_*.json)]
+        StatsJSON[(stats_*.json / lineups_*.json / managers_*.json)]
+    end
+
+    subgraph Area2 [Área 2: ETL y DDL]
+        DDL[database/crear_db.py]
+        Pipe[Pipeline]
+        MP[MatchProcessor]
+        PP[PlayerProcessor]
+        MngP[ManagerProcessor]
+        Load[Loader]
+    end
+
+    subgraph Area3 [Persistencia y ML]
+        SQLite[(database/oraculo.db)]
+        ML[Modelos Predictivos]
+    end
+
+    Main -->|1. Ejecuta descubrimiento| MC
+    MC -->|Guarda URLs| UrlsJSON
+    MC -->|Guarda eventos temporada| EventsJSON
+    
+    Main -->|2. Ejecuta extracción detalle| SS
+    UrlsJSON -->|Consume URLs| SS
+    SS -->|Guarda JSONs partido| StatsJSON
+
+    EventsJSON -->|3. Extrae contexto y eventos| Main
+    StatsJSON -->|Empareja por Id_partido| Main
+    Main -->|4. Ejecuta procesar_lote| Pipe
+    Pipe --> MP
+    Pipe --> PP
+    Pipe --> MngP
+    MP & PP & MngP --> Load
+    Main -.->|Inicializa / Audita| DDL
+    DDL --> SQLite
+    Load --> SQLite
+    SQLite -.->|5. Entrenamiento / Inferencia| ML
+```
+
+### 3.1 Detalle Técnico de `../main.py` (Orquestador CLI y Puente Raw $\rightarrow$ ETL)
+
+* **Responsabilidad Principal:** Proveer una interfaz de consola unificada (interactiva y por comandos directos) para ejecutar el flujo completo de extremo a extremo o etapas aisladas, además de actuar como puente de emparejamiento entre los JSON crudos de `../data/raw` y el `Pipeline` ETL.
+
+#### Modos de Ejecución (Inputs)
+1. **Menú Interactivo (`ejecutar_menu_interactivo()`):** Se inicia al ejecutar `python main.py` sin argumentos:
+   * `1`: **Flujo Completo** (`ejecutar_flujo_completo()`): Ejecuta Etapa 1 (Crawler) $\rightarrow$ Etapa 2 (Scraper) $\rightarrow$ Carga ETL a SQLite según `../config.json`.
+   * `2`: **Solo ETL** (`ejecutar_etl_desde_eventos()`): Permite seleccionar un archivo de `../data/raw/league_events` y carga sus partidos en SQLite.
+   * `3`: **Solo Scraping — Etapa 1**: Ejecuta `run_url_explorer()`.
+   * `4`: **Solo Scraping — Etapa 2**: Ejecuta `procesar_archivo_ronda()` sobre un archivo elegido de `urls_league_rounds/`.
+   * `5`: **Diagnóstico y Base de Datos** (`menu_diagnostico()`): Submenú para auditar esquemas JSON (`schema_explorer`), consultar conteo de filas por tabla en SQLite (`ver_estado_base_datos()`) o inicializar/verificar el esquema (`crear_base_datos()`).
+2. **Argumentos Directos CLI (`argparse`):**
+   * `python main.py --full`: Ejecuta el flujo completo para la ronda definida en `../config.json`.
+   * `python main.py --etl [ARCHIVO_EVENTOS]`: Carga un archivo específico de `league_events/` (o todos si se omite el nombre).
+   * `python main.py --init-db`: Inicializa o verifica las tablas de `../database/oraculo.db`.
+   * `python main.py --status`: Imprime el conteo actual de registros de las 11 tablas en SQLite.
+
+#### Procesamiento del Puente Raw $\rightarrow$ ETL (`ejecutar_etl_desde_eventos`)
+1. Lee el archivo `team_events_total_*.json` seleccionado e infiere la `ronda_filtro` desde el nombre del archivo si no se pasa explícitamente.
+2. Construye los diccionarios maestros `PAIS` y `LIGAS` mediante `_extraer_metadatos_competicion()`.
+3. Carga el mapa `{Id_partido: url}` desde el archivo homólogo en `urls_league_rounds/` (`_mapa_urls_ronda()`).
+4. Invoca `MatchProcessor().procesar_eventos_total(...)` para obtener los eventos finalizados deduplicados de la jornada.
+5. Por cada encuentro finalizado, busca en disco sus archivos correspondientes (`_buscar_archivo_partido()`) priorizando la ronda exacta (`_R{ronda}_{partido_id}.json`):
+   * `matchs_stats/` (obligatorio; si falta, omite el partido y lo contabiliza en el resumen).
+   * `players_stats/` y `managers/` (opcionales).
+6. Arma la lista de casos con su `contexto` completo e invoca `Pipeline(loader=Loader(db_path=DB_PATH, inicializar=True)).procesar_lote(casos, continuar_con_error=True)`.
+
+#### Criterios de Salida (Outputs)
+* Imprime un resumen de ejecución indicando partidos cargados con éxito, partidos omitidos por falta de estadísticas y errores individuales registrados en `../oraculo_scraper.log`.
+
+---
+
+## 4. Detalle Técnico — Área 1: Scraping
+
+> **Nota de implementación:** Actualmente, los componentes de esta capa están implementados como **módulos procedimentales en Python** (conjuntos de funciones cohesivas) y no como clases orientadas a objetos (`class`). Su diseño respeta el principio de responsabilidad única separando el *descubrimiento* (`match_crawler.py`) de la *extracción profunda* (`stats_scraper.py`).
+
+### Secuencia de Ejecución del Scraping
+
+```mermaid
+sequenceDiagram
+    actor Usuario as main.py / CLI
+    participant MC as match_crawler.py
+    participant Web as Sofascore (Chromium + API)
+    participant FS as data/raw/
+    participant SS as stats_scraper.py
+
+    Usuario->>MC: run_url_explorer()
+    MC->>Web: Navega a URL de Liga/Temporada
+    MC->>Web: GET /api/v1/.../team-events/total
+    Web-->>MC: JSON eventos temporada
+    MC->>FS: Guarda team_events_total_*.json
+    MC->>Web: Selecciona "Round N" en DOM y extrae hrefs
+    MC->>FS: Guarda urls_*_ronda_N.json
+
+    Usuario->>SS: procesar_archivo_ronda(archivo_urls)
+    SS->>FS: Lee lista de URLs de partidos
+    loop Por cada partido en la ronda
+        SS->>Web: Navega a URL del partido (#id:partido_id)
+        SS->>Web: Clic en pestañas + Intercepta /lineups y /managers (o Fallback API)
+        SS->>FS: Guarda lineups_*.json y managers_*.json
+        SS->>Web: Clic en "tab-statistics" + Intercepta /statistics
+        SS->>FS: Guarda stats_*.json
+    end
+```
+
+### 4.1 Módulo `../scrapers/match_crawler.py`
+
+* **Responsabilidad Principal:** Actuar como el explorador inicial de cada competición configurada. Descubre las URLs de los partidos correspondientes a la jornada objetivo mediante interacción con el DOM y descarga una instantánea completa de los eventos de la temporada desde la API interna.
+* **Punto de Entrada:** `run_url_explorer()`
+
+#### Criterios de Entrada (Inputs)
+* Archivo `../config.json`:
+  * `scraping_settings.ronda_objetivo` (`int`): Número de jornada a extraer.
+  * `scraping_settings.delay_min_seconds` / `delay_max_seconds` (`int`): Rango de pausa táctica entre acciones.
+  * `leagues` (`list[dict]`): Lista con `name`, `country`, `tournament_id` y `seasons` (`year`, `season_id`).
+
+#### Procesamiento Interno
+1. Inicia una instancia visible de Chromium mediante `sync_playwright()`.
+2. Itera sobre cada liga y temporada configurada, navegando a `https://www.sofascore.com/tournament/football/{country}/{league}/{tournament_id}#id:{season_id}`.
+3. **Captura de eventos de temporada (`obtener_team_events_total`):** Realiza una petición directa (`page.request.get`) al endpoint `/api/v1/unique-tournament/{tournament_id}/season/{season_id}/team-events/total` aprovechando la sesión del navegador.
+4. **Descubrimiento en el DOM:** Localiza el selector de rondas (`combobox`), despliega la lista si es necesario, selecciona `"Round {ronda_objetivo}"` y extrae todos los enlaces únicos que contengan `/match/` dentro de `#tabpanel-round` (con selectores de respaldo).
+
+#### Criterios de Salida (Outputs)
+Genera dos artefactos JSON en disco por cada combinación válida de liga, temporada y ronda:
+1. **Índice de URLs de la ronda:**
+   * **Ruta:** `data/raw/urls_league_rounds/urls_{country}_{league}_{season}_ronda_{ronda}.json`
+   * **Estructura:** Diccionario con metadatos (`liga`, `pais`, `temporada`, `ronda`) y la lista deduplicada `urls` (`list[str]`).
+2. **Instantánea de eventos de temporada:**
+   * **Ruta:** `data/raw/league_events/team_events_total_{country}_{league}_{season}_ronda_{ronda}.json`
+   * **Estructura:** Respuesta JSON cruda con la llave raíz `tournamentTeamEvents` (insumo clave para reconstruir contexto de partidos en el ETL).
+
+#### Gestión de Errores y Resiliencia
+* **Fallo en carga de página o interacción con el menú de rondas:** Captura la excepción, registra el error en el `logger` y ejecuta `continue` para saltar a la siguiente temporada sin abortar el lote completo.
+* **Fallo en `team-events/total`:** Registra el error HTTP o de estructura (`ValueError`) en el log y continúa con la extracción de URLs en el DOM.
+
+### 4.2 Módulo `../scrapers/stats_scraper.py`
+
+* **Responsabilidad Principal:** Consumir los archivos de URLs generados por el crawler, visitar cada encuentro individual y extraer tres bloques de información cruda: alineaciones/jugadores, directores técnicos y estadísticas colectivas del equipo.
+* **Punto de Entrada:** `procesar_archivo_ronda(nombre_archivo_json: str)`
+
+#### Criterios de Entrada (Inputs)
+* `nombre_archivo_json` (`str`): Nombre del archivo ubicado en `../data/raw/urls_league_rounds` (ej. `urls_england_premier-league_25-26_ronda_3.json`).
+* Archivo `../config.json`:
+  * `scraping_settings.user_agent_default` (`str`).
+  * `scraping_settings.delay_min_match` / `delay_max_match` (`int`).
+
+#### Procesamiento Interno (Estrategia Híbrida)
+Para cada URL en `datos_ronda["urls"]`, extrae el `partido_id` desde el fragmento `#id:{partido_id}` y ejecuta tres extracciones independientes:
+1. **Alineaciones y Estadísticas de Jugador (`obtener_lineups`):** Fuerza la recarga de red haciendo clic en `tab-2` (*Player Stats*) y regresando a `tab-1` (*Lineups*) mientras escucha con `page.expect_response` el endpoint `/api/v1/event/{partido_id}/lineups`. Si ocurre un timeout o fallo de interfaz, activa un **mecanismo de respaldo (fallback)** consultando directamente el endpoint vía `page.request.get`.
+2. **Entrenadores (`obtener_lineups_y_managers`):** Registra un listener pasivo (`page.on("response")`) durante la carga de alineaciones para capturar `/api/v1/event/{partido_id}/managers`. Si no se dispara en red, ejecuta el fallback directo al endpoint.
+3. **Estadísticas de Equipo (`obtener_estadisticas_equipo`):** Localiza `button[data-testid="tab-statistics"]`, hace clic e intercepta mediante `page.expect_response` el endpoint `/api/v1/event/{partido_id}/statistics`.
+
+#### Criterios de Salida (Outputs)
+Por cada partido procesado con éxito, persiste hasta tres archivos JSON crudos:
+1. **Alineaciones y jugadores:** `data/raw/players_stats/lineups_{liga}_R{ronda}_{partido_id}.json`
+2. **Directores técnicos:** `data/raw/managers/managers_{liga}_R{ronda}_{partido_id}.json`
+3. **Estadísticas colectivas:** `data/raw/matchs_stats/stats_{liga}_R{ronda}_{partido_id}.json`
+
+#### Gestión de Errores y Resiliencia
+* **Aislamiento por partido:** Si `page.goto()` falla por timeout, se registra el error y se salta al siguiente encuentro sin detener el lote.
+* **Desacoplamiento entre bloques:** La captura de `lineups/managers` y la de `estadísticas de equipo` están envueltas en bloques `try/except` separados; si un partido no tiene datos de entrenadores o alineaciones, el scraper igualmente intenta capturar y guardar sus estadísticas colectivas.
+
+---
+
+## 5. Módulos Transversales y Herramientas de Soporte
+
+Estos módulos proveen infraestructura compartida para los flujos de producción y herramientas de inspección para el desarrollador. Todo script nuevo debe reutilizar estas funciones en lugar de duplicar lógica.
+
+| Módulo | Función / Punto de Entrada | Tipo | Entrada (Inputs) | Salida / Efecto (Outputs) | Responsabilidad |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `../utils/json_reader.py` | `load_config()` | Utilidad Runtime | Ninguno (resuelve `../config.json` en raíz) | `dict` con parámetros del sistema | Centraliza la lectura de configuración global desde cualquier subcarpeta. |
+| `../utils/logger.py` | `setup_logger()` | Utilidad Runtime | Ninguno | Configura `logging` hacia consola (`stdout`) y `../oraculo_scraper.log` | Inicializa bitácoras estandarizadas evitando duplicar *handlers*. |
+| `../utils/base.py` | `random_sleep(min_s, max_s)` | Utilidad Runtime | `min_s: float`, `max_s: float` | Pausa síncrona (`time.sleep`) e impresión en consola | Simula tiempos de espera humanos para mitigar bloqueos anti-bot. |
+| `../utils/schema_explorer.py` | `main()` / `explorar_carpeta(carpeta)` | Herramienta CLI Dev | Argumento CLI opcional o menú interactivo sobre `data/raw/*` | Reporte en consola de rutas de campos, tipos de datos y llaves únicas | Audita la estructura real de los JSON crudos antes de construir o ajustar los procesadores ETL. |
+
+---
+
+## 6. Detalle Técnico — Área 2: ETL y Persistencia DDL
+
+A diferencia de la capa de extracción, la capa **ETL** está implementada mediante **Programación Orientada a Objetos (OOP)** siguiendo principios SOLID:
+
+* **Procesadores sin estado (*Stateless*):** `MatchProcessor`, `PlayerProcessor` y `ManagerProcessor` son transformadores puros; reciben diccionarios crudos e identificadores, y retornan estructuras normalizadas sin almacenar estado mutable entre partidos.
+* **Inyección de Dependencias:** `Pipeline` recibe sus colaboradores en el constructor (`__init__`), facilitando pruebas unitarias con *mocks* o bases de datos SQLite en memoria (`:memory:`).
+* **Estructuras Nativas de Python:** Toda la transformación opera sobre `dict` y `list[dict]` (sin dependencia de Pandas en esta capa), optimizando la inserción fila a fila mediante sentencias parametrizadas `UPSERT` en SQLite.
+
+### Diagrama de Clases del ETL
+
+```mermaid
+classDiagram
+    class PipelineError {
+        <<ValueError>>
+    }
+
+    class Pipeline {
+        +CAMPOS_CONTEXTO: set
+        +loader: Loader
+        +match_processor: MatchProcessor
+        +player_processor: PlayerProcessor
+        +manager_processor: ManagerProcessor
+        +leer_json(origen) dict
+        +validar_contexto(contexto) None
+        +procesar_partido(contexto, match_json, player_json, manager_json) dict
+        +procesar_lote(casos, continuar_con_error) dict
+    }
+
+    class MatchProcessor {
+        +procesar_evento(json_data, id_liga, url) dict
+        +procesar_eventos_total(json_data, id_liga, ronda, urls) list~dict~
+        +procesar(json_data, id_partido, id_equipo_local, id_equipo_visita) list~dict~
+    }
+
+    class PlayerProcessor {
+        +procesar(json_data, id_partido, id_equipo_local, id_equipo_visita) dict
+    }
+
+    class ManagerProcessor {
+        +LADOS: tuple
+        +procesar(json_data, id_partido, id_equipo_local, id_equipo_visita) dict
+    }
+
+    class Loader {
+        +db_path: str
+        +conectar() Connection
+        +cargar(datos) dict
+        +cargar_partido(...) dict
+    }
+
+    class Common {
+        <<Utility>>
+        +entero(valor)$ int
+        +decimal(valor)$ float
+        +porcentaje(valor)$ float
+        +booleano(valor)$ bool
+        +fecha_desde_timestamp(valor)$ str
+        +fecha_hora_desde_timestamp(valor)$ str
+    }
+
+    Pipeline ..> PipelineError : lanza
+    Pipeline --> MatchProcessor : delega stats
+    Pipeline --> PlayerProcessor : delega alineaciones
+    Pipeline --> ManagerProcessor : delega managers
+    Pipeline --> Loader : delega persistencia
+    MatchProcessor ..> Common : usa
+    PlayerProcessor ..> Common : usa
+    ManagerProcessor ..> Common : usa
+```
+
+### Secuencia de Ejecución del Pipeline ETL
+
+```mermaid
+sequenceDiagram
+    actor Orquestador as main.py / Script Piloto
+    participant Pipe as Pipeline
+    participant MP as MatchProcessor
+    participant PP as PlayerProcessor
+    participant MngP as ManagerProcessor
+    participant Load as Loader
+    participant DB as SQLite (oraculo.db)
+
+    Orquestador->>Pipe: procesar_partido(contexto, match_json, player_json, manager_json)
+    Pipe->>Pipe: validar_contexto(contexto)
+    Pipe->>Pipe: leer_json(...)
+    
+    Pipe->>MP: procesar(match_data, id_partido, id_local, id_visita)
+    MP-->>Pipe: list[dict] (PARTIDOS_ESTADISTICAS)
+
+    opt player_json != None
+        Pipe->>PP: procesar(player_data, id_partido, id_local, id_visita)
+        PP-->>Pipe: dict (jugadores, alineaciones, estadisticas, partidos_equipos)
+    end
+
+    opt manager_json != None
+        Pipe->>MngP: procesar(manager_data, id_partido, id_local, id_visita)
+        MngP-->>Pipe: dict (entrenadores, entrenadores_partido)
+    end
+
+    Pipe->>Load: cargar_partido(paises, liga, equipos, partido, datos_match, ...)
+    Load->>DB: BEGIN TRANSACTION + PRAGMA foreign_keys = ON
+    loop Por cada tabla en ORDEN_CARGA (11 tablas)
+        Load->>DB: PRAGMA table_info + INSERT ... ON CONFLICT DO UPDATE
+    end
+    Load->>DB: COMMIT
+    DB-->>Load: OK
+    Load-->>Pipe: dict (conteo de registros por tabla)
+    Pipe-->>Orquestador: {"Id_partido": id, "cargados": cantidades}
+```
+
+### 6.1 Clase `Pipeline` (`../etl/pipeline.py`)
+
+* **Responsabilidad Principal:** Orquestar el ciclo completo de transformación y carga para un partido individual o un lote de encuentros, asegurando que el contexto maestro sea válido antes de invocar a los procesadores o abrir conexiones a la base de datos.
+* **Constructor:** `Pipeline(loader=None, match_processor=None, player_processor=None, manager_processor=None)` (instancia por defecto los componentes reales si no se inyectan).
+
+#### Criterios de Entrada (Inputs)
+Método principal `procesar_partido(contexto, match_json, player_json=None, manager_json=None)`:
+* `contexto` (`dict`): Diccionario obligatorio que debe contener las llaves `CAMPOS_CONTEXTO`:
+  * `"paises"`: `dict | list[dict]`
+  * `"liga"`: `dict | list[dict]`
+  * `"equipos"`: `list[dict]` (debe incluir los registros correspondientes a `id_equipo_local` e `id_equipo_visita`)
+  * `"partido"`: `dict` (debe incluir `"Id_partido"`)
+  * `"id_equipo_local"`: `int`
+  * `"id_equipo_visita"`: `int`
+  * `"partidos_equipos"` *(opcional)*: `list[dict]`
+* `match_json` (`dict | str | PathLike`): JSON crudo de estadísticas de equipo (obligatorio).
+* `player_json` (`dict | str | PathLike | None`): JSON crudo de alineaciones y jugadores (opcional).
+* `manager_json` (`dict | str | PathLike | None`): JSON crudo de entrenadores (opcional).
+
+#### Procesamiento Interno
+1. Ejecuta `validar_contexto(contexto)` verificando existencia de llaves obligatorias, `Id_partido` y coherencia de IDs entre `equipos`, `id_equipo_local` e `id_equipo_visita`.
+2. Convierte rutas de archivo a diccionarios mediante `leer_json()`.
+3. Invoca `match_processor.procesar(...)`; si retorna vacío, aborta lanzando `PipelineError`.
+4. Si `player_json` está presente, invoca `player_processor.procesar(...)` y prioriza sus relaciones `partidos_equipos` (ya que contienen formación y colores de camiseta).
+5. Si `manager_json` está presente, invoca `manager_processor.procesar(...)`.
+6. Si no existen relaciones `partidos_equipos`, genera las relaciones básicas mediante `_relaciones_basicas(contexto)`.
+7. Delega la persistencia atómica a `loader.cargar_partido(...)`.
+
+#### Criterios de Salida (Outputs)
+* `procesar_partido(...)` retorna `dict`: `{"Id_partido": int, "cargados": dict[str, int]}`.
+* `procesar_lote(casos, continuar_con_error=False)` retorna `dict`: `{"procesados": list[dict], "errores": list[dict]}`.
+
+#### Gestión de Errores y Resiliencia
+* Define la excepción específica `PipelineError(ValueError)` para fallos de lectura JSON, contexto incompleto o ausencia de estadísticas de partido.
+* En `procesar_lote()`, si `continuar_con_error=False` (por defecto), detiene la ejecución ante el primer fallo (`KeyError`, `ValueError`, `sqlite3.Error`). Si es `True`, captura el error por partido, lo registra en `"errores"` y continúa con el resto del lote.
+
+### 6.2 Clase `MatchProcessor` (`../etl/match_processor.py`)
+
+* **Responsabilidad Principal:** Cumple una doble función de normalización sobre los datos del encuentro:
+  1. Transforma metadatos de eventos finalizados (tanto unitarios como desde `team-events/total`) para construir el contexto de partido, equipos y marcadores.
+  2. Aplana las estadísticas colectivas por período (`ALL`, `1ST`, `2ST`) provenientes de `../data/raw/matchs_stats`.
+
+#### Criterios de Entrada (Inputs)
+* **Para estadísticas (`procesar`):** `json_data` (`dict` con llave `"statistics"`), `id_partido` (`int`), `id_equipo_local` (`int`), `id_equipo_visita` (`int`).
+* **Para metadatos (`procesar_evento` / `procesar_eventos_total`):** `json_data` (`dict` de evento o de `tournamentTeamEvents`), `id_liga` (`int`), `ronda` (`int | None`), `urls` (`dict[int, str] | None`).
+
+#### Procesamiento Interno
+1. **Normalización de Eventos (`procesar_evento` / `procesar_eventos_total`):**
+   * Deduplica eventos por `event.id` y filtra estrictamente aquellos con `status.type == "finished"`.
+   * Resuelve el marcador final buscando en orden `display` $\rightarrow$ `current` $\rightarrow$ `normaltime` sin convertir ausencias en cero.
+   * Convierte `startTimestamp` a formato ISO 8601 UTC (`Fecha_hora_utc`) y construye la URL canónica si no se provee.
+2. **Normalización de Estadísticas (`procesar`):**
+   * Itera sobre cada bloque de período (`ALL`, `1ST`, `2ST`) creando dos registros base (`local` y `visita`).
+   * Mapea **40 métricas simples** definidas en `ESTADISTICAS_SIMPLES` (ej. `cornerKicks` $\rightarrow$ `Corners`, `fouls` $\rightarrow$ `Faltas`, `throwIns` $\rightarrow$ `Saques_de_banda`, `ballPossession` $\rightarrow$ `Posesion_balon` en proporción decimal).
+   * Descompone **7 métricas compuestas** definidas en `ESTADISTICAS_COMPUESTAS` extrayendo tanto el denominador (`total`) como el numerador (`value`) (ej. `accurateCross` $\rightarrow$ `Total_centros` y `Centros_exitosos`).
+
+#### Criterios de Salida (Outputs)
+* `procesar(...)` retorna `list[dict]` con 2 registros por período (6 registros en un partido estándar con `ALL`, `1ST`, `2ST`), listos para la tabla `PARTIDOS_ESTADISTICAS`.
+* `procesar_evento(...)` retorna `dict` con llaves: `"partido"`, `"equipos"`, `"partidos_equipos"`, `"id_equipo_local"`, `"id_equipo_visita"`.
+
+#### Gestión de Errores y Resiliencia
+* En `procesar_evento`, lanza `ValueError` si el partido no está finalizado (`status.type != "finished"`) o si faltan campos críticos (`event.id`, `homeTeam.id`, `awayTeam.id`, `startTimestamp`).
+* En `procesar`, si una estadística puntual no viene en el JSON de Sofascore, simplemente no se añade al diccionario, permitiendo que SQLite la almacene como `NULL`.
+
+### 6.3 Clase `PlayerProcessor` (`../etl/player_processor.py`)
+
+* **Responsabilidad Principal:** Extraer desde `lineups_*.json` el estado de confirmación de alineaciones, la configuración táctica de ambos equipos, el catálogo de jugadores únicos, su participación en el partido y sus métricas individuales.
+
+#### Criterios de Entrada (Inputs)
+* `procesar(json_data, id_partido, id_equipo_local, id_equipo_visita)`:
+  * `json_data` (`dict`): Contenido de `lineups_*.json` (con llaves `"confirmed"`, `"home"`, `"away"`).
+  * `id_partido` (`int`), `id_equipo_local` (`int`), `id_equipo_visita` (`int`).
+
+#### Procesamiento Interno
+1. Extrae `alineacion_confirmada` desde `json_data.get("confirmed")`.
+2. Recorre `"home"` y `"away"`:
+   * Construye el registro de `partidos_equipos` con `Formacion`, `Color_jugadores` y `Color_portero`.
+   * Itera sobre `players`, deduplicando por `player.id` (`jugadores_vistos`) para generar registros maestros en `jugadores` (incluyendo `Pais_codigo_alpha3`, `Pais_nombre`, estatura y fecha de nacimiento UTC).
+   * Genera el registro de participación en `alineaciones` invirtiendo `substitute` para calcular `Es_titular`.
+   * Si el jugador posee bloque `statistics`, traduce hasta **72 métricas individuales** mediante `PLAYER_STATS_MAP` más `ratingVersions` (`Rating_original` y `Rating_alternativo`).
+
+#### Criterios de Salida (Outputs)
+Retorna un `dict` estructurado con 5 llaves:
+* `"jugadores"`: `list[dict]` $\rightarrow$ tabla `JUGADORES`.
+* `"alineaciones"`: `list[dict]` $\rightarrow$ tabla `ALINEACION`.
+* `"estadisticas"`: `list[dict]` $\rightarrow$ tabla `JUGADORES_ESTADISTICAS`.
+* `"partidos_equipos"`: `list[dict]` $\rightarrow$ tabla `PARTIDOS_EQUIPOS`.
+* `"alineacion_confirmada"`: `bool | None` $\rightarrow$ atributo `PARTIDOS.Alineacion_confirmada`.
+
+#### Gestión de Errores y Resiliencia
+* Omite silenciosamente entradas de jugadores que carezcan de `player.id` válido (`id_jugador is None`), evitando romper la carga del resto de la plantilla.
+
+### 6.4 Clase `ManagerProcessor` (`../etl/manager_processor.py`)
+
+* **Responsabilidad Principal:** Normalizar la información de los directores técnicos local y visitante desde `managers_*.json` y vincularlos con su respectivo equipo y partido.
+
+#### Criterios de Entrada (Inputs)
+* `procesar(json_data, id_partido, id_equipo_local, id_equipo_visita)`:
+  * `json_data` (`dict`): Contenido de `managers_*.json` con llaves opcionales `"homeManager"` y `"awayManager"`.
+  * `id_partido` (`int`), `id_equipo_local` (`int`), `id_equipo_visita` (`int`).
+
+#### Procesamiento Interno
+1. Valida que `json_data` sea un diccionario y que `id_partido`, `id_equipo_local` e `id_equipo_visita` sean enteros válidos.
+2. Evalúa `"homeManager"` (`local`) y `"awayManager"` (`visita`); si alguno es `None` en el JSON, lo omite sin fallar.
+3. Extrae los atributos maestros (`Id_entrenador`, `Nombre_entrenador`, `Nombre_corto`, `Slug`) y genera el vínculo relacional (`Id_partido`, `Id_equipo`, `Id_entrenador`).
+
+#### Criterios de Salida (Outputs)
+Retorna un `dict` con 2 llaves:
+* `"entrenadores"`: `list[dict]` $\rightarrow$ tabla `ENTRENADORES`.
+* `"entrenadores_partido"`: `list[dict]` $\rightarrow$ tabla `ENTRENADORES_PARTIDO`.
+
+#### Gestión de Errores y Resiliencia
+* Lanza `ValueError` si faltan los identificadores obligatorios del partido/equipos o si un nodo `homeManager`/`awayManager` existe pero carece de `id`. Tolera valores `None` cuando Sofascore no reporta entrenador para uno de los equipos.
+
+### 6.5 Clase `Loader` (`../etl/loader.py`)
+
+* **Responsabilidad Principal:** Persistir de manera idempotente y transaccional todas las entidades normalizadas en SQLite (`../database/oraculo.db`), respetando estrictamente la jerarquía de claves foráneas y validando la estructura contra el esquema físico de la base de datos antes de escribir.
+* **Constructor:** `Loader(db_path=DB_PATH, inicializar=True)` (ejecuta `crear_base_datos(db_path)` si `inicializar=True`).
+
+#### Criterios de Entrada (Inputs)
+Método de alto nivel `cargar_partido(paises, liga, equipos, partido, datos_match, datos_player=None, datos_manager=None, partidos_equipos=None)` o método genérico `cargar(datos: dict)`.
+
+#### Procesamiento Interno
+1. Abre conexión SQLite activando `PRAGMA foreign_keys = ON` dentro de un bloque contextual `with self.conectar() as conexion:` (garantizando **atomicidad ACID**: ante cualquier error se ejecuta `ROLLBACK` completo).
+2. Recorre las **11 tablas** en orden topológico estricto (`ORDEN_CARGA`):
+   `PAIS` $\rightarrow$ `LIGAS` $\rightarrow$ `EQUIPOS` $\rightarrow$ `JUGADORES` $\rightarrow$ `ENTRENADORES` $\rightarrow$ `PARTIDOS` $\rightarrow$ `PARTIDOS_EQUIPOS` $\rightarrow$ `ENTRENADORES_PARTIDO` $\rightarrow$ `ALINEACION` $\rightarrow$ `PARTIDOS_ESTADISTICAS` $\rightarrow$ `JUGADORES_ESTADISTICAS`.
+3. **Resolución dinámica de nacionalidades (`_resolver_pais_jugador`):** Para registros en `JUGADORES`, busca el país en `PAIS` por `Codigo_alpha3` o `Nombre_pais`; si no existe, lo inserta automáticamente y asigna el `Id_pais` generado.
+4. **Inspección de esquema y `UPSERT` (`_upsert`):**
+   * Consulta `PRAGMA table_info("{tabla}")` para rechazar cualquier columna desconocida antes de construir el SQL.
+   * Ejecuta `INSERT INTO "{tabla}" ... ON CONFLICT ({CLAVES_CONFLICTO}) DO UPDATE SET ...` (o `DO NOTHING` cuando todas las columnas forman parte de la clave primaria, como en `ENTRENADORES_PARTIDO`).
+
+#### Criterios de Salida (Outputs)
+* Retorna `dict[str, int]` indicando la cantidad exacta de registros procesados por cada una de las 11 tablas (ej. `{"PAIS": 1, "LIGAS": 1, "EQUIPOS": 2, ..., "PARTIDOS_ESTADISTICAS": 6}`).
+
+#### Gestión de Errores y Resiliencia
+* **Fail-Fast con Rollback Atómico:** Lanza `ValueError` si se intenta cargar una tabla no autorizada, si faltan columnas de clave primaria (`CLAVES_CONFLICTO`) o si se envían columnas inexistentes en SQLite. Si falla la última tabla (`JUGADORES_ESTADISTICAS`), toda la transacción del partido se revierte para evitar datos huérfanos o partidos cargados a medias.
+
+### 6.6 Clase `Common` (`../etl/common.py`)
+
+* **Responsabilidad Principal:** Proveer funciones estáticas puras de sanitización y casteo de tipos para todos los procesadores ETL, garantizando que valores ausentes (`None`), booleanos erróneos o cadenas malformadas nunca se transformen silenciosamente en `0` ni rompan la ejecución.
+
+| Método Estático | Entrada | Regla de Transformación | Salida |
+| :--- | :--- | :--- | :--- |
+| `Common.entero(valor)` | `Any` | Rechaza `None` y `bool`; convierte vía `int(float(str(valor).strip()))` | `int \| None` |
+| `Common.decimal(valor)` | `Any` | Rechaza `None` y `bool`; limpia sufijo `"km"` y convierte a `float` | `float \| None` |
+| `Common.porcentaje(valor)` | `Any` | Convierte `"55%"` o `55` en `0.55`; conserva proporciones $\le 1$ sin alterar | `float \| None` |
+| `Common.booleano(valor)` | `Any` | Interpreta `bool`, `int/float` y cadenas (`"true"`, `"1"`, `"si"`, `"sí"`, `"yes"`, `"false"`, `"0"`, `"no"`) | `bool \| None` |
+| `Common.fecha_desde_timestamp(valor)` | `int \| str \| None` | Convierte timestamp Unix a fecha UTC en formato ISO (`YYYY-MM-DD`) | `str \| None` |
+| `Common.fecha_hora_desde_timestamp(valor)` | `int \| str \| None` | Convierte timestamp Unix a fecha-hora ISO 8601 explícita en UTC (`...Z`) | `str \| None` |
+
+### 6.7 Capa DDL: `../database/crear_db.py`
+
+* **Responsabilidad Principal:** Inicializar y validar el esquema físico relacional de SQLite (`../database/oraculo.db`), protegiendo la integridad referencial y evitando la destrucción accidental de datos históricos ante cambios de esquema.
+* **Punto de Entrada:** `crear_base_datos(db_path=DB_PATH)`
+
+#### Criterios de Entrada (Inputs)
+* `db_path` (`str`, opcional): Ruta al archivo SQLite; por defecto apunta a `../database/oraculo.db`.
+
+#### Procesamiento Interno
+1. Garantiza la existencia del directorio destino (`os.makedirs(..., exist_ok=True)`).
+2. Abre conexión SQLite, ejecuta `PRAGMA foreign_keys = ON` y verifica mediante consulta que el motor haya activado efectivamente el soporte de claves foráneas.
+3. **Migración Defensiva (`_preparar_esquema`):** Inspecciona `sqlite_master` y `PRAGMA table_info` en busca de esquemas legados (ausencia de `Fecha_hora_utc` o presencia de columnas obsoletas como `Estado_partido` o `Rondas`). Si detecta un esquema antiguo, comprueba tabla por tabla si existe al menos un registro (`SELECT EXISTS(SELECT 1 FROM ... LIMIT 1)`).
+4. **Ejecución DDL (`SCHEMA_SQL`):** Crea mediante `CREATE TABLE IF NOT EXISTS` las **11 tablas** del modelo y **5 índices** de consulta (`idx_partidos_liga_fecha`, `idx_alineacion_equipo`, `idx_entrenadores_partido_entrenador`, `idx_partido_stats_equipo`, `idx_jugador_stats_equipo`). Las **53 columnas** de estadísticas colectivas y **74 columnas** individuales se generan dinámicamente mediante `_columnas()` para mantener paridad exacta con `MatchProcessor` y `PlayerProcessor`.
+
+#### Criterios de Salida (Outputs)
+* Crea o actualiza el archivo `../database/oraculo.db` listo para recibir transacciones del `Loader`.
+
+#### Gestión de Errores y Resiliencia
+* **Protección Anti-Pérdida de Datos:** Si `_preparar_esquema` detecta un esquema legado que **ya contiene datos**, aborta inmediatamente lanzando `sqlite3.DatabaseError` indicando qué tablas tienen registros, impidiendo ejecutar `DROP TABLE` sobre información real. Solo reconstruye tablas automáticamente si el esquema legado está 100 % vacío.
+
+---
+
+## 7. Detalle Técnico — Área 3: Machine Learning *(Visión Futura)*
+
+* **Estado:** Pendiente de inicio (bloqueado hasta completar la carga piloto y estabilizar el histórico en `../database/oraculo.db`).
+* **Principio de Diseño:** El módulo `../ml_models` operará como un consumidor de solo lectura sobre SQLite. Tendrá prohibido leer directamente archivos JSON de `../data/raw` para garantizar que tanto el entrenamiento como las predicciones pre-partido utilicen datos validados y normalizados por el pipeline ETL.

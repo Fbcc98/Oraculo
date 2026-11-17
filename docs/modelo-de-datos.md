@@ -1,169 +1,186 @@
-# 1. Visión General del Proyecto
+# Modelo de datos
 
-## 1.1 Propósito del Proyecto:
+## Índice
 
-El proyecto "Oráculo" es una iniciativa de desarrollo de software destinada a la recolección, estructuración y análisis de estadísticas de fútbol. 
-Su propósito central es construir una herramienta automatizada que facilite la toma de decisiones estratégicas y basadas en datos dentro del ámbito 
-de las apuestas deportivas.
+- [Diccionario SQLite vigente](#diccionario-sqlite)
+- [Del diseño al código](#del-diseño-al-código)
+- [Diseño original](#diseño-original)
+  - [Catálogos y partidos](#catálogos-y-partidos)
+  - [Estadísticas de jugadores](#estadísticas-de-jugadores)
+  - [Estadísticas de partidos](#estadísticas-de-partidos)
+  - [Relaciones originales](#relaciones-originales)
 
-A nivel personal, este sistema tiene un doble valor fundamental:
+PAIS es la entidad maestra. LIGAS, EQUIPOS, JUGADORES y ALINEACION son entidades intermedias. PARTIDOS, PARTIDOS_ESTADISTICAS y JUGADORES_ESTADISTICAS registran encuentros y métricas. ENTRENADORES, PARTIDOS_EQUIPOS y ENTRENADORES_PARTIDO completan el esquema.
 
-* Valor Práctico y Emocional: Busca generar una fuente de ingresos adicional de manera metódica y controlada, con el fin de brindar apoyo 
-económico a mi familia y seres queridos.
+Un país agrupa ligas y una liga agrupa partidos. PARTIDOS_EQUIPOS identifica cada participante y limita a uno por condición local o visitante. ALINEACION vincula al jugador con su equipo en el encuentro. Las estadísticas se almacenan por equipo y período o por jugador y partido.
 
-* Valor Educativo (Sandbox Técnico): Funciona como un entorno de pruebas real para consolidar y poner en práctica conocimientos avanzados 
-en Ingeniería de Software, Arquitectura de Datos (Web Scraping y automatización con Playwright), Modelamiento de Bases de Datos (SQLite/SQL) y 
-Ciencia de Datos (Machine Learning y análisis predictivo).
+## Diccionario SQLite
 
-## 1.2 Alcance:
+Cada fila agrupa atributos del mismo tipo en la misma tabla. Las claves compuestas se muestran en orden. [Definición SQL](../database/crear_db.py)
 
-El alcance inicial del proyecto contempla el ciclo de vida completo de los datos (Pipeline ETL), dividido en tres grandes fases tecnológicas: 
-automatización de extracción (Web Scraping), almacenamiento relacional y análisis predictivo (Machine Learning).
+### PAIS
 
-### 1. Dentro del Alcance:
+| Tipo | Atributos |
+|---|---|
+| INTEGER | `Id_pais` |
+| TEXT | `Codigo_alpha3`, `Nombre_pais` |
 
-1. **Extracción de Datos**: Desarrollo de un motor de web scraping capaz de extraer el historial estadístico de partidos de forma automatizada.
-2. **Fuente Única de Verdad**: Los datos se obtendrán inicialmente de un único portal deportivo, seleccionando estratégicamente aquel 
-cuyas métricas y tiempos de actualización se alineen con los modelos utilizados por las casas de apuestas.
-3. **Arquitectura de Datos (ETL)**: Diseño e implementación de una Base de Datos Relacional para procesar, limpiar y almacenar las 
-estadísticas extraídas, permitiendo la generación de consultas e indicadores propios.
-4. **Modelo de Machine Learning**: En su fase final, el proyecto incluye el diseño y entrenamiento de un algoritmo predictivo para estimar 
-las condiciones generales de un partido (específicamente estadísticas de volumen, como overs de córneres, faltas o saques de banda), 
-sirviendo como apoyo para identificar apuestas de valor (Value Bets).
+PK: `(Id_pais)`.
 
-### 2. Fuera del Alcance:
+Sin FK.
 
-Para acotar el desarrollo y evitar la expansión descontrolada del proyecto (*Scope Creep*), se establecen formalmente los siguientes límites:
+### LIGAS
 
-1. **Automatización Transaccional:** No incluye la colocación automatizada de apuestas (*Auto-betting*) ni la integración con plataformas de pago/casinos.
-2. **Frecuencia Temporal:** Exclusivamente pre-partido (*pre-match*). No contempla análisis en vivo ni procesamiento *in-play*.
-3. **Cobertida Deportiva y Geográfica:** Restringido a partidos de fútbol de las ligas europeas seleccionadas en la Etapa 1.
-4. **Lógica de Modelado:** Se excluye la predicción directa de resultados finales (Mercado 1X2). [cite_start]El enfoque es 100% probabilístico sobre eventos de volumen (córneres, faltas, saques de banda).
-5. **Scraping de Arbitraje:** No incluye scraping multifuente en paralelo para la búsqueda de *Surebets*.
-6. **Interfaz y Frontend:** No incluye el desarrollo de un Dashboard Web ni aplicación móvil; la interacción se realizará a nivel de consola y scripts ejecutables.
+| Tipo | Atributos |
+|---|---|
+| INTEGER | `Id_liga`, `Id_pais`, `Id_temporada_externo` |
+| TEXT | `Nombre_liga`, `Temporada` |
 
-## 1.3 Objetivos del Proyecto:
+PK: `(Id_liga)`.
 
-### Objetivo general:
+FK: `(Id_pais)` → `PAIS(Id_pais)`.
 
-Desarrollar un sistema automatizado de extracción de datos (Pipeline ETL) y un modelo predictivo de Machine Learning capaz de analizar 
-estadísticas históricas de fútbol, con el fin de proyectar escenarios de partido e identificar cuotas de valor (Value Bets) en los mercados deportivos.
+### EQUIPOS
 
-### Objetivos Específicos:
+| Tipo | Atributos |
+|---|---|
+| INTEGER | `Id_equipo`, `Id_pais` |
+| TEXT | `Nombre_equipo`, `Slug` |
 
-El software tiene como objetivo predicir las estadísticas de los partidos:
+PK: `(Id_equipo)`.
 
-  1. Objetivo de Ingeniería de Datos: Construir un motor de web scraping y una base de datos relacional capaz de extraer, 
-limpiar y almacenar el 100% de las estadísticas clave de los partidos de las ligas seleccionadas de forma automatizada.
-  2. Objetivo de Predicción Conservadora (Bajo Riesgo): Entrenar un modelo de clasificación que logre predecir estadísticas 
-de volumen (ej. Over de córneres, saques de banda o faltas) con una tasa de acierto (Accuracy) igual o superior al 70%, sirviendo 
-como escudo financiero para la estrategia.
-  3. Objetivo de Predicción de Alto Riesgo: Desarrollar un algoritmo que logre identificar ineficiencias en cuotas de alto valor 
-(Hándicaps, resultados exactos), logrando un retorno de inversión (ROI) positivo a largo plazo, superando la probabilidad matemática 
-implícita de las casas de apuestas.
+FK: `(Id_pais)` → `PAIS(Id_pais)`.
 
----
+### JUGADORES
 
-# 2. Especificación de Requisitos
+| Tipo | Atributos |
+|---|---|
+| INTEGER | `Id_jugador`, `Id_pais`, `Estatura_cm` |
+| TEXT | `Nombre_jugador`, `Nombre_corto`, `Slug`, `Fecha_nacimiento`, `Genero`, `Posicion_principal` |
 
-## 2.1. Requisitos Funcionales
-| ID | Nombre | Descripción |
-| :--- | :--- | :--- |
-| **RF-01** | Crawling de URLs | Extracción de enlaces de partidos por liga y temporada. |
-| **RF-02** | Interceptación API | Captura de respuestas JSON directamente de la red mediante Playwright. |
-| **RF-03** | Pipeline ETL | Limpieza, estructuración y filtrado de estadísticas cuantitativas de volumen. |
-| **RF-04** | Carga a BD | Inyección de datos transformados a SQLite (`oraculo.db`). |
-| **RF-05** | Modelo Predictivo | Estimación de probabilidades para eventos de volumen (córneres, faltas, etc.). |
+PK: `(Id_jugador)`.
 
-## 2.2. Requisitos No Funcionales
-| ID | Nombre | Descripción |
-| :--- | :--- | :--- |
-| **RNF-01** | Comportamiento Humano | Incorporación de pausas aleatorias para mitigar detección anti-scraping. |
-| **RNF-02** | Parametrización | Configuración centralizada vía `json/yaml` independiente del código. |
-| **RNF-03** | Portabilidad | Manejo de rutas relativas con `os.path` respecto a la raíz del proyecto. |
-| **RNF-04** | Integridad Referencial | Control estricto de claves foráneas en la base de datos relacional. |
+FK: `(Id_pais)` → `PAIS(Id_pais)`.
 
----
+### ENTRENADORES
 
-# 3. Arquitectura del Sistema y Diseño
+| Tipo | Atributos |
+|---|---|
+| INTEGER | `Id_entrenador` |
+| TEXT | `Nombre_entrenador`, `Nombre_corto`, `Slug` |
 
-## 3.1 Arquitectura de Carpetas y Módulos.
+PK: `(Id_entrenador)`.
 
-El proyecto "Oráculo" sigue un diseño modular. Esto permite separar las responsabilidades (extracción, transformación, 
-base de datos y configuración) para que el código sea mantenible, escalable y a prueba de errores. 
+Sin FK.
 
-La estructura de directorios del proyecto se organiza de la siguiente manera:
+### PARTIDOS
 
-```text
-oraculo_project/
-│
-├── main.py                  # "Director de Orquesta": Punto de entrada único que orquesta los scripts.
-├── config.json              # Archivo de configuración (rutas, parámetros de ligas, temporadas).
-│
-├── scrapers/                # Módulo de Extracción (Web Scraping)
-│   ├── match_crawler.py     # Navega por el DOM y extrae las URLs/IDs de los partidos de la liga por rondas.
-│   └── stats_scraper.py     # Intercepta el tráfico de red con Playwright y descarga los JSON de estadísticas.
-│
-├── etl/                     # Módulo de Transformación (Procesamiento de Datos)
-│   ├── json_processor.py    # Itera sobre la carpeta de descargas para aplanar los JSON.
-│   └── data_cleaner.py      # Utiliza Pandas para limpiar, castear tipos y estructurar los DataFrames.
-│
-├── database/                # Módulo de Carga y Modelado (Base de Datos)
-│   ├── crear_db.py          # Script DDL (Data Definition Language) para inicializar tablas y FKs (SQLite).
-│   └── db_manager.py        # Gestiona la conexión e inyecta los datos limpios (ej. mediante .to_sql()).
-│
-├── utils/                   # Herramientas Transversales compartidas por todos los módulos
-│   ├── base.py              # Funciones auxiliares genéricas (ej. random_sleep() para scraping ético).
-│   ├── logger.py            # Configuración de los logs de ejecución del sistema.
-│   └── json_reader.py       # Utilidades para cargar parámetros del config.json.
-│
-├── ml_models                # Carpeta par almacenar los modelos de machine learning para consuman la database
-│
-└── data/                    # Almacenamiento local temporal (Ignorado en repositorios git)
-    ├── matchs_stats/           # Archivos JSON crudos de estadisticas de los partidos.
-    └── urls_league_rounds/     # Archivos JSON generados para almacenar las urls de los partidos por rondas.
-```
+| Tipo | Atributos |
+|---|---|
+| INTEGER | `Id_partido`, `Id_liga`, `Ronda`, `Goles_local`, `Goles_visita`, `Alineacion_confirmada` |
+| TEXT | `Fecha_hora_utc`, `Url` |
 
+PK: `(Id_partido)`.
 
-## 3.2 Pipeline de Datos.
+FK: `(Id_liga)` → `LIGAS(Id_liga)`.
 
-El flujo de vida de los datos sigue un proceso clásico de Ingeniería de Datos ETL (Extracción, Transformación y Carga), 
-diseñado para ejecutarse de manera secuencial y automatizada:
+### PARTIDOS_EQUIPOS
 
-### Fase 1: Extracción (Extract)
-* Herramientas: Python + Playwright.
+| Tipo | Atributos |
+|---|---|
+| INTEGER | `Id_partido`, `Id_equipo`, `Condicion_local` |
+| TEXT | `Formacion`, `Color_jugadores`, `Color_portero` |
 
-* Proceso: El orquestador (main.py) invoca a los scrapers. Utilizando Playwright, el bot navega como un humano (aplicando 
-pausas tácticas con random_sleep), hace clic en las pestañas de estadísticas y escucha el tráfico de red (Network Interception) 
-para atrapar directamente las respuestas JSON de la API oculta del servidor (ej. Sofascore).
+PK: `(Id_partido, Id_equipo)`.
 
-* Salida: Archivos unitarios .json por cada partido guardados en data/raw_jsons/.
+FK: `(Id_equipo)` → `EQUIPOS(Id_equipo)`.
 
-### Fase 2: Transformación (Transform)
-* Herramientas: Python + Pandas.
+FK: `(Id_partido)` → `PARTIDOS(Id_partido)`.
 
-* Proceso: El módulo ETL lee los JSON crudos almacenados. Aísla los bloques clave (filtrando por partido completo 'ALL' o 
-tiempos '1ST'/'2ST'). A continuación, a través de DataFrames de Pandas, se limpian los datos: se eliminan símbolos basura 
-(como % o km), se castean variables a números flotantes o enteros, y se renuevan las claves para que coincidan con los atributos de la base de datos.
+### ENTRENADORES_PARTIDO
 
-* Salida: Estructuras de datos (DataFrames) limpias, normalizadas y listas para relacionarse.
+| Tipo | Atributos |
+|---|---|
+| INTEGER | `Id_partido`, `Id_equipo`, `Id_entrenador` |
 
-### Fase 3: Carga (Load)
-* Herramientas: Python + SQLite (vía SQLAlchemy o conector nativo).
+PK: `(Id_partido, Id_equipo)`.
 
-* Proceso: Se inicializa la base de datos ejecutando crear_db.py (asegurando PRAGMA foreign_keys = ON). Posteriormente, se 
-inyectan los DataFrames limpios a las tablas correspondientes respetando la jerarquía relacional estricta: 
-PAIS -> LIGAS -> EQUIPOS -> PARTIDOS -> ESTADISTICAS_PARTIDO.
+FK: `(Id_entrenador)` → `ENTRENADORES(Id_entrenador)`.
 
-* Salida: Base de datos relacional robusta, con historiales de partidos listos para ser consultados mediante SQL.
+FK: `(Id_partido, Id_equipo)` → `PARTIDOS_EQUIPOS(Id_partido, Id_equipo)`.
 
-### Fase 4: Consumo (Machine Learning - Trabajo Futuro)
-* Proceso: Una vez el pipeline ETL estabilicé la base de datos, los modelos predictivos (Clasificación/Regresión) leerán 
-directamente de las tablas para encontrar Value Bets e ineficiencias de cuotas en las estadísticas de volumen (córneres, saques de banda, faltas).
+### ALINEACION
 
-## 3.3 Modelo de Datos 
+| Tipo | Atributos |
+|---|---|
+| INTEGER | `Id_partido`, `Id_jugador`, `Id_equipo`, `Es_titular`, `Dorsal` |
+| TEXT | `Posicion_partido` |
 
-### Diccionario de Datos
+PK: `(Id_partido, Id_jugador)`.
+
+FK: `(Id_jugador)` → `JUGADORES(Id_jugador)`.
+
+FK: `(Id_partido, Id_equipo)` → `PARTIDOS_EQUIPOS(Id_partido, Id_equipo)`.
+
+### PARTIDOS_ESTADISTICAS
+
+| Tipo | Atributos |
+|---|---|
+| INTEGER | `Id_partido`, `Id_equipo`, `Grandes_ocasiones`, `Sprints`, `Corners`, `Faltas`, `Pases`, `Entradas` |
+| INTEGER | `Tiros_libres`, `Tarjetas_amarillas`, `Tarjetas_rojas`, `Remates`, `Tiros_arco`, `Tiros_al_palo`, `Tiros_fuera`, `Tiros_bloqueados` |
+| INTEGER | `Tiros_adentro_del_area`, `Tiros_afuera_del_area`, `Ocasiones_claras_realizadas`, `Ocasiones_claras_falladas`, `Toques_dentro_del_area`, `Faltas_recibidas_ultimo_tercio`, `Fueras_de_juego`, `Pases_precisos` |
+| INTEGER | `Saques_de_banda`, `Entradas_ultimo_tercio`, `Total_pases_area_penal_adversaria`, `Pases_precisos_area_penal_adversaria`, `Total_balones_largos`, `Balones_largos_precisos`, `Total_centros`, `Centros_exitosos` |
+| INTEGER | `Balones_perdidos`, `Total_duelos_suelo`, `Duelos_suelo_ganados`, `Total_duelos_aereos`, `Duelos_aereos_ganados`, `Total_regates`, `Regates_ganados`, `Total_entradas` |
+| INTEGER | `Entradas_ganadas`, `Intercepciones`, `Recuperaciones`, `Despejes`, `Errores_terminan_tiro`, `Errores_terminan_gol`, `Atajadas`, `Grandes_atajadas` |
+| INTEGER | `Balones_aereos_atrapados`, `Despejes_punos`, `Saques_de_arco` |
+| TEXT | `Periodo` |
+| REAL | `Posesion_balon`, `Distancia_recorrida_km`, `Goles_esperados_xG`, `Porcentaje_duelos_ganados`, `Goles_evitados` |
+
+PK: `(Id_partido, Id_equipo, Periodo)`.
+
+FK: `(Id_partido, Id_equipo)` → `PARTIDOS_EQUIPOS(Id_partido, Id_equipo)`.
+
+### JUGADORES_ESTADISTICAS
+
+| Tipo | Atributos |
+|---|---|
+| INTEGER | `Id_partido`, `Id_jugador`, `Id_equipo`, `Minutos_jugados`, `Goles`, `Asistencias`, `Remates`, `Remates_arco` |
+| INTEGER | `Remates_fuera`, `Remates_bloqueados`, `Tiros_al_palo`, `Grandes_ocasiones_creadas`, `Grandes_ocasiones_falladas`, `Pases`, `Pases_precisos`, `Pases_clave` |
+| INTEGER | `Pases_campo_propio`, `Pases_precisos_campo_propio`, `Pases_campo_rival`, `Pases_precisos_campo_rival`, `Balones_largos`, `Balones_largos_precisos`, `Centros`, `Centros_precisos` |
+| INTEGER | `Regates`, `Regates_ganados`, `Duelos_ganados`, `Duelos_perdidos`, `Duelos_aereos_ganados`, `Duelos_aereos_perdidos`, `Entradas`, `Entradas_ganadas` |
+| INTEGER | `Intercepciones`, `Recuperaciones`, `Despejes`, `Bloqueos`, `Faltas_cometidas`, `Faltas_recibidas`, `Fueras_de_juego`, `Perdidas_posesion` |
+| INTEGER | `Desposesiones`, `Controles_fallidos`, `Toques`, `Conducciones_balon`, `Conducciones_progresivas`, `Sprints`, `Desafios_perdidos`, `Despejes_linea_gol` |
+| INTEGER | `Entradas_ultimo_hombre`, `Errores_terminan_remate`, `Errores_terminan_gol`, `Autogoles`, `Penales_cometidos`, `Penales_recibidos`, `Atajadas`, `Atajadas_dentro_area` |
+| INTEGER | `Salidas_portero`, `Salidas_portero_precisas`, `Centros_altos_atrapados`, `Despejes_punos`, `Penales_enfrentados` |
+| REAL | `Rating`, `Goles_esperados_xG`, `Asistencias_esperadas_xA`, `Goles_esperados_al_arco_xGOT`, `Distancia_conduccion_balon`, `Distancia_conduccion_progresiva`, `Progresion_total`, `Mejor_progresion_conduccion` |
+| REAL | `Distancia_recorrida_km`, `Velocidad_maxima`, `Distancia_corriendo_km`, `Distancia_alta_velocidad_km`, `Distancia_sprint_km`, `Valor_atajadas_portero`, `Goles_evitados`, `Rating_original` |
+| REAL | `Rating_alternativo` |
+
+PK: `(Id_partido, Id_jugador)`.
+
+FK: `(Id_partido, Id_equipo)` → `PARTIDOS_EQUIPOS(Id_partido, Id_equipo)`.
+
+FK: `(Id_partido, Id_jugador)` → `ALINEACION(Id_partido, Id_jugador)`.
+
+## Del diseño al código
+
+El [esquema SQLite](../database/crear_db.py) define las tablas que crea la aplicación. El [plan de la carga piloto](otros/PROXIMA_SESION.md) recoge los acuerdos sobre identificadores, fechas y partidos finalizados.
+
+| Aspecto | Definición en el esquema actual |
+|---|---|
+| Equipos de un partido | `PARTIDOS_EQUIPOS` identifica cada participante mediante partido y equipo. `Condicion_local` distingue los dos lados. Las consultas de local y visitante pasan por esta tabla. |
+| Entrenadores | `ENTRENADORES` guarda la identidad. `ENTRENADORES_PARTIDO` asigna el entrenador al equipo en ese encuentro. |
+| Jornada y fecha | `PARTIDOS` conserva `Ronda` y exige `Fecha_hora_utc`. El total de rondas de la liga y el estado del partido quedaron fuera del esquema según el acuerdo del piloto. |
+| Temporada | `LIGAS` conserva la temporada y su ID externo. Separar competición y temporada sigue siendo una [propuesta](otros/IDEAS_FUTURAS.md). |
+| Estadísticas | Cada fila de equipo corresponde a un partido, equipo y período. Cada fila individual corresponde a un partido y jugador y se vincula con su alineación. |
+
+Al cambiar una entidad, actualizar la fila correspondiente con el acuerdo que motivó el cambio y el módulo que lo implementa. Mantener los diccionarios originales como referencia histórica.
+
+## Diseño original
+
+Las siguientes definiciones conservan los atributos, tipos y relaciones del diseño inicial. Para consultas sobre la implementación, utiliza el diccionario SQLite vigente.
+
+### Catálogos y partidos
 
 #### Entidad: PAIS
 > **Descripción:** Entidad maestra que almacena el catálogo de países registrados.
@@ -248,6 +265,8 @@ directamente de las tablas para encontrar Value Bets e ineficiencias de cuotas e
 
 ---
 
+### Estadísticas de jugadores
+
 #### Entidad: JUGADORES_ESTADISTICAS
 > **Descripción:** Entidad analitica que almacena el rendimiento de los jugadores
 
@@ -316,6 +335,8 @@ directamente de las tablas para encontrar Value Bets e ineficiencias de cuotas e
 
 ---
 
+### Estadísticas de partidos
+
 #### Entidad: PARTIDOS_ESTADISTICAS
 > **Descripción:** Entidad analítica granular de rendimiento por equipo y período.
 
@@ -383,7 +404,7 @@ directamente de las tablas para encontrar Value Bets e ineficiencias de cuotas e
 
 ---
 
-### 3.2. Modelo Relacional No Gráfico
+### Relaciones originales
 
 #### a. Entidades Maestras
 Son tablas independientes que sirven como catálogos base para el sistema.
@@ -408,13 +429,11 @@ Registran los eventos reales y el volumen de datos analíticos.
 * **`PARTIDOS_ESTADISTICAS`**:Entidad analítica granular. Hereda las claves foráneas `Id_partido` e `Id_equipo`. 
 Posee una clave primaria compuesta formada por `(Id_partido, Id_equipo, Periodo)`, lo que garantiza la unicidad e integridad de los datos de rendimiento para un equipo y período específico en cada partido.
 
-# 4. Roadmap y Planificación por Etapas
+### Evolución prevista para Fases 2 y 3 (Fuera del Piloto Actual)
 
-El desarrollo del Proyecto "Oráculo" se ejecutará bajo un enfoque iterativo e incremental, dividido en cuatro grandes fases. 
-Esto garantiza la entrega de valor temprano (MVP) antes de escalar hacia modelos predictivos complejos.
+El esquema vigente de 11 tablas cubre íntegramente la recolección deportiva de la **Fase 1**. Para soportar las etapas predictivas y de ejecución auditada se proyectan las siguientes extensiones:
 
-# 5. Estrategia de Pruebas y Calidad
-
-# 6. Gestión de Riesgos y Mitigación
-
-# 7. Estándares y Convenciones de Código
+| Tabla proyectada | Fase | Propósito | Clave y relación principal |
+| :--- | :--- | :--- | :--- |
+| **`CUOTAS_PREPARTIDO`** | Fase 2 | Almacenar cuotas capturadas por mercado y línea para calcular probabilidad implícita y Valor Esperado ($EV$). | PK: `(Id_cuota)` · FK: `(Id_partido)` $\rightarrow$ `PARTIDOS` |
+| **`BITACORA_APUESTAS`** | Fase 3 | Registrar cada apuesta ejecutada, monto apostado (*stake*), probabilidad estimada, resultado y retorno neto para auditoría del *bankroll*. | PK: `(Id_apuesta)` · FK: `(Id_partido)` $\rightarrow$ `PARTIDOS` |
