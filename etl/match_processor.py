@@ -72,6 +72,153 @@ ESTADISTICAS_COMPUESTAS = {
 
 class MatchProcessor:
     @staticmethod
+    def _evento(json_data):
+        """Acepta un evento directo o una respuesta envuelta en ``event``."""
+        if not isinstance(json_data, dict):
+            raise ValueError("El evento debe ser un objeto JSON")
+        evento = json_data.get("event", json_data)
+        if not isinstance(evento, dict):
+            raise ValueError("La respuesta no contiene un objeto event válido")
+        return evento
+
+    @staticmethod
+    def _marcador_final(score):
+        """Obtiene el marcador mostrado sin convertir ausencias en cero."""
+        if not isinstance(score, dict):
+            return None
+        for campo in ("display", "current", "normaltime"):
+            valor = Common.entero(score.get(campo))
+            if valor is not None:
+                return valor
+        return None
+
+    @staticmethod
+    def _url_evento(evento):
+        slug = evento.get("slug")
+        custom_id = evento.get("customId")
+        event_id = Common.entero(evento.get("id"))
+        if not slug or not custom_id or event_id is None:
+            return None
+        return (
+            f"https://www.sofascore.com/football/match/{slug}/"
+            f"{custom_id}#id:{event_id}"
+        )
+
+    def procesar_evento(self, json_data, id_liga, url=None):
+        """Normaliza exclusivamente los metadatos acordados de un partido finalizado."""
+        evento = self._evento(json_data)
+        estado = (evento.get("status") or {}).get("type")
+        if estado != "finished":
+            raise ValueError(
+                f"El evento {evento.get('id')} no está finalizado: {estado!r}"
+            )
+
+        home_team = evento.get("homeTeam") or {}
+        away_team = evento.get("awayTeam") or {}
+        event_id = Common.entero(evento.get("id"))
+        home_team_id = Common.entero(home_team.get("id"))
+        away_team_id = Common.entero(away_team.get("id"))
+        fecha_hora_utc = Common.fecha_hora_desde_timestamp(
+            evento.get("startTimestamp")
+        )
+
+        faltantes = []
+        if event_id is None:
+            faltantes.append("event.id")
+        if home_team_id is None:
+            faltantes.append("homeTeam.id")
+        if away_team_id is None:
+            faltantes.append("awayTeam.id")
+        if fecha_hora_utc is None:
+            faltantes.append("startTimestamp")
+        if faltantes:
+            raise ValueError(
+                "Faltan identificadores o fecha obligatorios: "
+                + ", ".join(faltantes)
+            )
+
+        partido = {
+            "Id_partido": event_id,
+            "Id_liga": Common.entero(id_liga),
+            "Fecha_hora_utc": fecha_hora_utc,
+            "Ronda": Common.entero((evento.get("roundInfo") or {}).get("round")),
+            "Goles_local": self._marcador_final(evento.get("homeScore")),
+            "Goles_visita": self._marcador_final(evento.get("awayScore")),
+            "Url": url or self._url_evento(evento),
+        }
+        equipos = [
+            {
+                "Id_equipo": home_team_id,
+                "Nombre_equipo": home_team.get("name"),
+                "Slug": home_team.get("slug"),
+            },
+            {
+                "Id_equipo": away_team_id,
+                "Nombre_equipo": away_team.get("name"),
+                "Slug": away_team.get("slug"),
+            },
+        ]
+        partidos_equipos = [
+            {
+                "Id_partido": event_id,
+                "Id_equipo": home_team_id,
+                "Condicion_local": True,
+            },
+            {
+                "Id_partido": event_id,
+                "Id_equipo": away_team_id,
+                "Condicion_local": False,
+            },
+        ]
+        return {
+            "partido": partido,
+            "equipos": equipos,
+            "partidos_equipos": partidos_equipos,
+            "id_equipo_local": home_team_id,
+            "id_equipo_visita": away_team_id,
+        }
+
+    def procesar_eventos_total(self, json_data, id_liga, ronda=None, urls=None):
+        """Deduplica y normaliza los eventos finalizados de team-events/total."""
+        raiz = (json_data or {}).get("tournamentTeamEvents")
+        if not isinstance(raiz, dict):
+            raise ValueError("El JSON no contiene tournamentTeamEvents")
+
+        eventos_unicos = {}
+        for grupo in raiz.values():
+            if not isinstance(grupo, dict):
+                continue
+            for eventos_equipo in grupo.values():
+                if not isinstance(eventos_equipo, list):
+                    continue
+                for evento in eventos_equipo:
+                    if not isinstance(evento, dict):
+                        continue
+                    event_id = Common.entero(evento.get("id"))
+                    if event_id is not None:
+                        eventos_unicos.setdefault(event_id, evento)
+
+        ronda_objetivo = Common.entero(ronda)
+        urls = urls or {}
+        normalizados = []
+        for event_id, evento in eventos_unicos.items():
+            if (evento.get("status") or {}).get("type") != "finished":
+                continue
+            event_round = Common.entero(
+                (evento.get("roundInfo") or {}).get("round")
+            )
+            if ronda_objetivo is not None and event_round != ronda_objetivo:
+                continue
+            normalizados.append(
+                self.procesar_evento(
+                    evento,
+                    id_liga,
+                    url=urls.get(event_id),
+                )
+            )
+        return normalizados
+
+    @staticmethod
     def _valor(item, condicion, fuente):
         sufijo = "home" if condicion == "local" else "away"
         if fuente == "display":

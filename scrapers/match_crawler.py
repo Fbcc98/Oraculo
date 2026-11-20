@@ -8,13 +8,67 @@ sys.path.append(base_dir)
 
 from utils.json_reader import load_config
 from utils.base import random_sleep
-from utils.logger import setup_logger  # <--- Importamos nuestro nuevo módulo
+from utils.logger import setup_logger
 from playwright.sync_api import sync_playwright
 
 setup_logger()
 
-data_dir = os.path.join(base_dir, 'data', 'urls_league_rounds')
+data_dir = os.path.join(base_dir, 'data', 'raw', 'urls_league_rounds')
+raw_league_events_dir = os.path.join(base_dir, 'data', 'raw', 'league_events')
 os.makedirs(data_dir, exist_ok=True)
+os.makedirs(raw_league_events_dir, exist_ok=True)
+
+TEAM_EVENTS_TOTAL_ENDPOINT = (
+    "https://www.sofascore.com/api/v1/unique-tournament/"
+    "{tournament_id}/season/{season_id}/team-events/total"
+)
+
+
+def normalizar_nombre_directorio(valor):
+    """Normaliza nombres usados en la jerarquía de datos crudos."""
+    return valor.strip().lower().replace(" ", "-").replace("/", "-")
+
+
+def obtener_team_events_total(page, tournament_id, season_id, timeout=15000):
+    """Obtiene la respuesta cruda de eventos de una liga y temporada."""
+    endpoint = TEAM_EVENTS_TOTAL_ENDPOINT.format(
+        tournament_id=tournament_id,
+        season_id=season_id,
+    )
+    response = page.request.get(endpoint, timeout=timeout)
+
+    if not response.ok:
+        raise RuntimeError(
+            f"El endpoint team-events/total respondió HTTP "
+            f"{response.status}: {endpoint}"
+        )
+
+    datos = response.json()
+    if not isinstance(datos.get("tournamentTeamEvents"), dict):
+        raise ValueError(
+            "La respuesta team-events/total no contiene "
+            "'tournamentTeamEvents'."
+        )
+
+    return datos
+
+
+def guardar_team_events_total(datos, league, season, ronda):
+    """Guarda una instantánea cruda identificada por liga, temporada y ronda."""
+    country_name = normalizar_nombre_directorio(league["country"])
+    league_name = normalizar_nombre_directorio(league["name"])
+    season_name = normalizar_nombre_directorio(season["year"])
+    output_path = os.path.join(
+        raw_league_events_dir,
+        (
+            f"team_events_total_{country_name}_{league_name}_"
+            f"{season_name}_ronda_{ronda}.json"
+        ),
+    )
+    with open(output_path, "w", encoding="utf-8") as archivo:
+        json.dump(datos, archivo, indent=4, ensure_ascii=False)
+
+    return output_path
 
 def run_url_explorer():
     logging.info("Iniciando Oráculo - Explorador de URLs...")
@@ -27,10 +81,7 @@ def run_url_explorer():
         logging.info("Levantando navegador Chromium...")
         browser = p.chromium.launch(headless=False,args=['--start-maximized'])
 
-        context = browser.new_context(
-            user_agent=settings['user_agent_default'],
-            no_viewport = True
-        )
+        context = browser.new_context(no_viewport=True)
         page = context.new_page()
         logging.info("Navegador iniciado correctamente.")
 
@@ -55,6 +106,29 @@ def run_url_explorer():
                     continue
 
                 random_sleep(settings['delay_min_seconds'], settings['delay_max_seconds'])
+
+                try:
+                    logging.info(
+                        "Obteniendo JSON crudo team-events/total de la temporada..."
+                    )
+                    team_events_total = obtener_team_events_total(
+                        page,
+                        league['tournament_id'],
+                        season['season_id'],
+                    )
+                    ruta_team_events = guardar_team_events_total(
+                        team_events_total,
+                        league,
+                        season,
+                        ronda_objetivo,
+                    )
+                    logging.info(
+                        f"JSON team-events/total guardado en: {ruta_team_events}"
+                    )
+                except Exception as e:
+                    logging.error(
+                        f"No se pudo obtener o guardar team-events/total: {e}"
+                    )
 
                 logging.info("Buscando y cerrando banners de cookies/publicidad...")
 

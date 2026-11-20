@@ -65,6 +65,13 @@ PLAYER_STATS_MAP = {
 
 
 class PlayerProcessor:
+    @staticmethod
+    def _color_primario(color):
+        """Extrae el color hexadecimal principal informado por Sofascore."""
+        if isinstance(color, dict):
+            return color.get("primary")
+        return color
+
     def procesar(self, json_data, id_partido, id_equipo_local, id_equipo_visita):
         resultado = {"jugadores": [], "alineaciones": [], "estadisticas": [], "partidos_equipos": []}
         resultado["alineacion_confirmada"] = Common.booleano(json_data.get("confirmed"))
@@ -79,6 +86,12 @@ class PlayerProcessor:
                     "Id_partido": id_partido, "Id_equipo": id_equipo,
                     "Condicion_local": condicion == "home",
                     "Formacion": bloque_equipo.get("formation"),
+                    "Color_jugadores": self._color_primario(
+                        bloque_equipo.get("playerColor")
+                    ),
+                    "Color_portero": self._color_primario(
+                        bloque_equipo.get("goalkeeperColor")
+                    ),
                 })
                 equipos_vistos.add(id_equipo)
 

@@ -64,3 +64,14 @@ class Common:
         except (OverflowError, OSError, ValueError):
             return None
 
+    @staticmethod
+    def fecha_hora_desde_timestamp(valor):
+        """Convierte un timestamp Unix a texto ISO 8601 explícitamente en UTC."""
+        timestamp = Common.entero(valor)
+        if timestamp is None:
+            return None
+        try:
+            fecha_hora = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            return fecha_hora.isoformat().replace("+00:00", "Z")
+        except (OverflowError, OSError, ValueError):
+            return None

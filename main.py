@@ -1,84 +1,440 @@
-import os
+"""Punto de entrada y orquestador CLI del sistema Oráculo."""
 
-from etl.schema_explorer import elegir_carpeta, explorar_carpeta
-from scrapers.match_crawler import run_url_explorer
+import argparse
+import json
+import logging
+import os
+import sqlite3
+
+from database.crear_db import DB_PATH, crear_base_datos
+from etl.common import Common
+from etl.loader import ORDEN_CARGA, Loader
+from etl.match_processor import MatchProcessor
+from etl.pipeline import Pipeline, PipelineError
+from scrapers.match_crawler import normalizar_nombre_directorio, run_url_explorer
 from scrapers.stats_scraper import procesar_archivo_ronda
+from utils.json_reader import load_config
+from utils.logger import setup_logger
+from utils.schema_explorer import elegir_carpeta, explorar_carpeta
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-INPUT_FOLDER = os.path.join(BASE_DIR, "data", "urls_league_rounds")
+RAW_DIR = os.path.join(BASE_DIR, "data", "raw")
+URLS_DIR = os.path.join(RAW_DIR, "urls_league_rounds")
+EVENTS_DIR = os.path.join(RAW_DIR, "league_events")
+MATCH_STATS_DIR = os.path.join(RAW_DIR, "matchs_stats")
+PLAYER_STATS_DIR = os.path.join(RAW_DIR, "players_stats")
+MANAGERS_DIR = os.path.join(RAW_DIR, "managers")
 
-def mostrar_menu():
-    print("\n" + "=" * 45)
-    print("  ORÁCULO - MOTOR DE RECOLECCIÓN")
-    print("=" * 45)
-    print("  1. Ejecutar Explorador de URLs (Etapa 1)")
-    print("  2. Extraer Estadísticas y Alineaciones (Etapa 2)")
-    print("  3. Explorar esquemas de JSON")
-    print("  0. Salir del sistema")
-    print("=" * 45)
 
-def seleccionar_archivo_ronda():
-    """Permite elegir el archivo de URLs que procesará el scraper."""
-    if not os.path.exists(INPUT_FOLDER):
-        print("\nLa carpeta de datos no existe aún. Ejecuta la Etapa 1 primero.")
-        return None
+# ---------------------------------------------------------------------------
+# Utilidades de selección y puente Raw JSON -> ETL
+# ---------------------------------------------------------------------------
 
-    archivos = sorted(
-        archivo for archivo in os.listdir(INPUT_FOLDER) if archivo.endswith(".json")
-    )
 
+def _listar_json(carpeta):
+    if not os.path.isdir(carpeta):
+        return []
+    return sorted(f for f in os.listdir(carpeta) if f.endswith(".json"))
+
+
+def _seleccionar_archivo(carpeta, etiqueta):
+    archivos = _listar_json(carpeta)
     if not archivos:
-        print("\nNo hay archivos JSON disponibles. Ejecuta la Etapa 1 primero.")
+        print(f"\nNo hay archivos JSON disponibles en {etiqueta}.")
         return None
 
-    print("\nArchivos disponibles:")
-    for indice, archivo in enumerate(archivos, start=1):
-        print(f"  {indice}. {archivo}")
-    print("  c. Cancelar y volver al menú principal")
+    print(f"\nArchivos disponibles en {etiqueta}:")
+    for idx, nombre in enumerate(archivos, start=1):
+        print(f"  {idx}. {nombre}")
+    print("  c. Cancelar y volver")
 
-    seleccion = input(
-        f"\nElige el archivo a procesar (1-{len(archivos)}): "
-    ).strip().lower()
-
+    seleccion = input(f"\nElige un archivo (1-{len(archivos)}): ").strip().lower()
     if seleccion == "c":
         return None
 
     try:
-        indice = int(seleccion) - 1
-        return archivos[indice]
+        return archivos[int(seleccion) - 1]
     except (ValueError, IndexError):
-        print("\nEntrada inválida. Debes ingresar un número dentro del rango.")
+        print("\nSelección inválida.")
         return None
 
 
-def main():
+def _buscar_archivo_partido(carpeta, partido_id, ronda=None):
+    """Localiza el JSON asociado a un partido priorizando la ronda exacta."""
+    if not os.path.isdir(carpeta):
+        return None
+
+    sufijo_exacto = f"_R{ronda}_{partido_id}.json" if ronda is not None else None
+    sufijo_general = f"_{partido_id}.json"
+
+    candidatos = _listar_json(carpeta)
+    if sufijo_exacto:
+        for nombre in candidatos:
+            if nombre.endswith(sufijo_exacto):
+                return os.path.join(carpeta, nombre)
+
+    for nombre in candidatos:
+        if nombre.endswith(sufijo_general):
+            return os.path.join(carpeta, nombre)
+
+    return None
+
+
+def _extraer_metadatos_competicion(eventos_json, nombre_archivo_eventos):
+    """Extrae los diccionarios maestros PAIS y LIGAS desde team_events_total."""
+    raiz = (eventos_json or {}).get("tournamentTeamEvents") or {}
+    primer_evento = None
+
+    for grupo in raiz.values():
+        if not isinstance(grupo, dict):
+            continue
+        for lista_eventos in grupo.values():
+            if isinstance(lista_eventos, list) and lista_eventos:
+                primer_evento = lista_eventos[0]
+                break
+        if primer_evento:
+            break
+
+    if not primer_evento:
+        raise PipelineError(
+            f"El archivo {nombre_archivo_eventos} no contiene eventos válidos."
+        )
+
+    torneo = primer_evento.get("tournament") or {}
+    torneo_unico = torneo.get("uniqueTournament") or {}
+    categoria = torneo.get("category") or {}
+    temporada_info = primer_evento.get("season") or {}
+
+    nombre_pais = categoria.get("name") or "Desconocido"
+    id_pais = Common.entero(categoria.get("id"))
+    if id_pais is None:
+        id_pais = abs(hash(nombre_pais)) % 100000 + 1
+
+    id_temporada = Common.entero(temporada_info.get("id"))
+    if id_temporada is None:
+        id_temporada = Common.entero(torneo_unico.get("id")) or 1
+
+    nombre_liga = (
+        torneo_unico.get("name") or torneo.get("name") or "Liga Desconocida"
+    )
+    temporada = str(temporada_info.get("year") or "N/A")
+
+    pais = {
+        "Id_pais": id_pais,
+        "Nombre_pais": nombre_pais,
+    }
+    liga = {
+        "Id_liga": id_temporada,
+        "Id_pais": id_pais,
+        "Nombre_liga": nombre_liga,
+        "Id_temporada_externo": id_temporada,
+        "Temporada": temporada,
+    }
+    return pais, liga
+
+
+def _mapa_urls_ronda(nombre_archivo_eventos):
+    """Carga el mapa {partido_id: url} si existe el archivo de URLs homólogo."""
+    nombre_urls = nombre_archivo_eventos.replace("team_events_total_", "urls_", 1)
+    ruta_urls = os.path.join(URLS_DIR, nombre_urls)
+    if not os.path.exists(ruta_urls):
+        return {}
+
+    try:
+        with open(ruta_urls, "r", encoding="utf-8") as f:
+            datos = json.load(f)
+        mapa = {}
+        for url in datos.get("urls", []):
+            if "#id:" in url:
+                partido_id = Common.entero(url.split("#id:")[-1])
+                if partido_id is not None:
+                    mapa[partido_id] = url
+        return mapa
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def ejecutar_etl_desde_eventos(nombre_archivo_eventos, ronda_filtro=None):
+    """Construye los casos de una jornada y los carga atómicamente en SQLite."""
+    ruta_eventos = os.path.join(EVENTS_DIR, nombre_archivo_eventos)
+    if not os.path.exists(ruta_eventos):
+        logging.error(f"No existe el archivo de eventos: {ruta_eventos}")
+        return
+
+    with open(ruta_eventos, "r", encoding="utf-8") as f:
+        eventos_json = json.load(f)
+
+    if ronda_filtro is None and "_ronda_" in nombre_archivo_eventos:
+        parte_ronda = nombre_archivo_eventos.split("_ronda_")[-1].replace(".json", "")
+        ronda_filtro = Common.entero(parte_ronda)
+
+    pais, liga = _extraer_metadatos_competicion(eventos_json, nombre_archivo_eventos)
+    mapa_urls = _mapa_urls_ronda(nombre_archivo_eventos)
+
+    match_processor = MatchProcessor()
+    eventos_normalizados = match_processor.procesar_eventos_total(
+        eventos_json,
+        id_liga=liga["Id_liga"],
+        ronda=ronda_filtro,
+        urls=mapa_urls,
+    )
+
+    if not eventos_normalizados:
+        logging.warning(
+            f"No se encontraron partidos finalizados para la ronda {ronda_filtro} "
+            f"en {nombre_archivo_eventos}."
+        )
+        return
+
+    casos = []
+    sin_estadisticas = 0
+
+    for item in eventos_normalizados:
+        partido = item["partido"]
+        id_partido = partido["Id_partido"]
+        ronda_partido = partido.get("Ronda") or ronda_filtro
+
+        ruta_stats = _buscar_archivo_partido(
+            MATCH_STATS_DIR, id_partido, ronda=ronda_partido
+        )
+        if not ruta_stats:
+            logging.warning(
+                f"Partido {id_partido} omitido: falta JSON en data/raw/matchs_stats/."
+            )
+            sin_estadisticas += 1
+            continue
+
+        ruta_lineups = _buscar_archivo_partido(
+            PLAYER_STATS_DIR, id_partido, ronda=ronda_partido
+        )
+        ruta_managers = _buscar_archivo_partido(
+            MANAGERS_DIR, id_partido, ronda=ronda_partido
+        )
+
+        equipos_con_pais = [
+            {**eq, "Id_pais": pais["Id_pais"]} for eq in item["equipos"]
+        ]
+
+        contexto = {
+            "paises": [pais],
+            "liga": liga,
+            "equipos": equipos_con_pais,
+            "partido": partido,
+            "partidos_equipos": item["partidos_equipos"],
+            "id_equipo_local": item["id_equipo_local"],
+            "id_equipo_visita": item["id_equipo_visita"],
+        }
+
+        casos.append(
+            {
+                "contexto": contexto,
+                "match_json": ruta_stats,
+                "player_json": ruta_lineups,
+                "manager_json": ruta_managers,
+            }
+        )
+
+    if not casos:
+        print(
+            "\nNo hay partidos con estadísticas descargadas listos para cargar. "
+            "Ejecuta primero el Scraper (Etapa 2)."
+        )
+        return
+
+    pipeline = Pipeline(loader=Loader(db_path=DB_PATH, inicializar=True))
+    resultado = pipeline.procesar_lote(casos, continuar_con_error=True)
+
+    print("\n" + "-" * 50)
+    print(f"RESUMEN DE CARGA ETL ({liga['Nombre_liga']} - Ronda {ronda_filtro})")
+    print("-" * 50)
+    print(f"  Partidos cargados en SQLite : {len(resultado['procesados'])}")
+    print(f"  Partidos sin JSON de stats  : {sin_estadisticas}")
+    print(f"  Partidos con error de carga : {len(resultado['errores'])}")
+
+    for err in resultado["errores"]:
+        pid = err["caso"]["contexto"]["partido"]["Id_partido"]
+        logging.error(f"Error cargando partido {pid}: {err['error']}")
+
+
+# ---------------------------------------------------------------------------
+# Flujos principales de operación
+# ---------------------------------------------------------------------------
+
+
+def ejecutar_flujo_completo():
+    """Ejecuta Scraping Etapa 1 -> Scraping Etapa 2 -> ETL SQLite según config.json."""
+    config = load_config()
+    ronda = config["scraping_settings"].get("ronda_objetivo", 1)
+
+    print(f"\n[1/3] Descubriendo partidos y eventos (Ronda {ronda})...")
+    run_url_explorer()
+
+    print(f"\n[2/3] Descargando estadísticas, alineaciones y managers (Ronda {ronda})...")
+    for league in config.get("leagues", []):
+        pais_slug = normalizar_nombre_directorio(league["country"])
+        liga_slug = normalizar_nombre_directorio(league["name"])
+
+        for season in league.get("seasons", []):
+            temp_slug = normalizar_nombre_directorio(season["year"])
+            archivo_urls = f"urls_{pais_slug}_{liga_slug}_{temp_slug}_ronda_{ronda}.json"
+            archivo_eventos = (
+                f"team_events_total_{pais_slug}_{liga_slug}_{temp_slug}_ronda_{ronda}.json"
+            )
+
+            if os.path.exists(os.path.join(URLS_DIR, archivo_urls)):
+                procesar_archivo_ronda(archivo_urls)
+            else:
+                logging.warning(f"No se generó {archivo_urls}; se omite descarga.")
+
+            print(f"\n[3/3] Cargando datos en SQLite para {league['name']} ({season['year']})...")
+            if os.path.exists(os.path.join(EVENTS_DIR, archivo_eventos)):
+                ejecutar_etl_desde_eventos(archivo_eventos, ronda_filtro=ronda)
+            else:
+                logging.warning(f"No se encontró {archivo_eventos} para carga ETL.")
+
+
+def ver_estado_base_datos():
+    """Muestra el conteo actual de registros en cada tabla de SQLite."""
+    if not os.path.exists(DB_PATH):
+        print(f"\nLa base de datos aún no existe en: {DB_PATH}")
+        print("Usa la opción 'Inicializar / Verificar base de datos' para crearla.")
+        return
+
+    print("\n" + "=" * 45)
+    print("  ESTADO ACTUAL DE SQLITE (oraculo.db)")
+    print("=" * 45)
+    with sqlite3.connect(DB_PATH) as conn:
+        for tabla in ORDEN_CARGA:
+            try:
+                total = conn.execute(f'SELECT COUNT(*) FROM "{tabla}"').fetchone()[0]
+                print(f"  {tabla:<25} : {total} registros")
+            except sqlite3.Error:
+                print(f"  {tabla:<25} : (tabla no creada)")
+    print("=" * 45)
+
+
+def menu_diagnostico():
     while True:
-        mostrar_menu()
-        opcion = input("\nSelecciona una opción (0-3): ").strip()
+        print("\n" + "-" * 45)
+        print("  DIAGNÓSTICO Y BASE DE DATOS")
+        print("-" * 45)
+        print("  1. Explorar esquemas de JSON crudos")
+        print("  2. Ver conteo de registros en SQLite")
+        print("  3. Inicializar / Verificar tablas de SQLite")
+        print("  0. Volver al menú principal")
+        print("-" * 45)
+
+        sub = input("\nSelecciona una opción (0-3): ").strip()
+        if sub == "1":
+            carpeta = elegir_carpeta()
+            explorar_carpeta(carpeta)
+        elif sub == "2":
+            ver_estado_base_datos()
+        elif sub == "3":
+            crear_base_datos(DB_PATH)
+        elif sub == "0":
+            break
+        else:
+            print("\nOpción no válida.")
+
+
+def mostrar_menu_principal():
+    print("\n" + "=" * 52)
+    print("  ORÁCULO - ORQUESTADOR DE DATOS DEPORTIVOS")
+    print("=" * 52)
+    print("  1. Flujo Completo (Scraping + Carga a SQLite)")
+    print("  2. Cargar datos descargados a SQLite (Solo ETL)")
+    print("  3. Solo Scraping - Etapa 1: URLs y Eventos de Liga")
+    print("  4. Solo Scraping - Etapa 2: Stats, Lineups y Managers")
+    print("  5. Diagnóstico y Base de Datos (JSON / SQLite)")
+    print("  0. Salir")
+    print("=" * 52)
+
+
+def ejecutar_menu_interactivo():
+    while True:
+        mostrar_menu_principal()
+        opcion = input("\nSelecciona una opción (0-5): ").strip()
 
         if opcion == "1":
-            print("\nIniciando Explorador de URLs...")
-            run_url_explorer()
+            ejecutar_flujo_completo()
 
         elif opcion == "2":
-            print("\nPreparando extracción de estadísticas y alineaciones...")
-            archivo_elegido = seleccionar_archivo_ronda()
-
-            if archivo_elegido:
-                print(f"\nEjecutando Etapa 2 para: {archivo_elegido}")
-                procesar_archivo_ronda(archivo_elegido)
+            archivo_eventos = _seleccionar_archivo(
+                EVENTS_DIR, "data/raw/league_events"
+            )
+            if archivo_eventos:
+                ejecutar_etl_desde_eventos(archivo_eventos)
 
         elif opcion == "3":
-            print("\nExplorador de esquemas JSON")
-            carpeta_elegida = elegir_carpeta()
-            explorar_carpeta(carpeta_elegida)
+            print("\nIniciando Explorador de URLs y Eventos...")
+            run_url_explorer()
+
+        elif opcion == "4":
+            archivo_urls = _seleccionar_archivo(
+                URLS_DIR, "data/raw/urls_league_rounds"
+            )
+            if archivo_urls:
+                procesar_archivo_ronda(archivo_urls)
+
+        elif opcion == "5":
+            menu_diagnostico()
 
         elif opcion == "0":
             print("\nCerrando Oráculo. ¡Hasta pronto!\n")
             break
 
         else:
-            print("\nOpción no válida. Por favor, selecciona 0, 1, 2 o 3.")
+            print("\nOpción no válida. Selecciona un número del 0 al 5.")
+
+
+def main():
+    setup_logger()
+    parser = argparse.ArgumentParser(
+        description="Orquestador CLI para recolección y carga ETL de Oráculo."
+    )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Ejecuta el flujo completo (Scraping + ETL) para la ronda en config.json.",
+    )
+    parser.add_argument(
+        "--etl",
+        metavar="ARCHIVO_EVENTOS",
+        nargs="?",
+        const="__AUTO__",
+        help="Ejecuta solo la carga ETL a SQLite (opcional: nombre del JSON en league_events).",
+    )
+    parser.add_argument(
+        "--init-db",
+        action="store_true",
+        help="Inicializa o verifica el esquema de database/oraculo.db.",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Muestra el conteo de registros por tabla en SQLite.",
+    )
+    args = parser.parse_args()
+
+    if args.init_db:
+        crear_base_datos(DB_PATH)
+    elif args.status:
+        ver_estado_base_datos()
+    elif args.full:
+        ejecutar_flujo_completo()
+    elif args.etl:
+        if args.etl == "__AUTO__":
+            archivos = _listar_json(EVENTS_DIR)
+            if not archivos:
+                print("\nNo hay archivos en data/raw/league_events/ para procesar.")
+                return
+            for archivo in archivos:
+                ejecutar_etl_desde_eventos(archivo)
+        else:
+            ejecutar_etl_desde_eventos(args.etl)
+    else:
+        ejecutar_menu_interactivo()
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Explorador de esquemas para los JSON crudos almacenados en ``data``.
+"""Explorador de esquemas para los JSON crudos almacenados en ``data/raw``.
 
 Uso interactivo:
     python etl/schema_explorer.py
@@ -15,7 +15,7 @@ import os
 from collections import defaultdict
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "data")
+DATA_DIR = os.path.join(BASE_DIR, "data", "raw")
 
 DATA_DIRECTORIES = {
     "urls_league_rounds": {
@@ -29,6 +29,14 @@ DATA_DIRECTORIES = {
     "players_stats": {
         "label": "Alineaciones y estadísticas individuales",
         "path": os.path.join(DATA_DIR, "players_stats"),
+    },
+    "league_events": {
+        "label": "Eventos generales por liga, temporada y ronda",
+        "path": os.path.join(DATA_DIR, "league_events"),
+    },
+    "managers": {
+        "label": "Managers local y visitante por partido",
+        "path": os.path.join(DATA_DIR, "managers"),
     },
 }
 

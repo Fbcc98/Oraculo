@@ -15,12 +15,14 @@ from utils.logger import setup_logger
 
 setup_logger()
 
-INPUT_FOLDER = os.path.join(base_dir, "data", "urls_league_rounds")
-OUTPUT_FOLDER = os.path.join(base_dir, "data", "matchs_stats")
-PLAYER_STATS_FOLDER = os.path.join(base_dir, "data", "players_stats")
+INPUT_FOLDER = os.path.join(base_dir, "data", 'raw', "urls_league_rounds")
+OUTPUT_FOLDER = os.path.join(base_dir, "data", 'raw', "matchs_stats")
+PLAYER_STATS_FOLDER = os.path.join(base_dir, "data", 'raw', "players_stats")
+MANAGERS_FOLDER = os.path.join(base_dir, "data", "raw", "managers")
 
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(PLAYER_STATS_FOLDER, exist_ok=True)
+os.makedirs(MANAGERS_FOLDER, exist_ok=True)
 
 LINEUPS_TAB_LOCATOR = 'button[data-testid="tab-1"]'
 
@@ -28,6 +30,9 @@ PLAYER_STATS_TAB_LOCATOR = 'button[data-testid="tab-2"]'
 
 LINEUPS_ENDPOINT_TEMPLATE = (
     "https://www.sofascore.com/api/v1/event/{partido_id}/lineups"
+)
+MANAGERS_ENDPOINT_TEMPLATE = (
+    "https://www.sofascore.com/api/v1/event/{partido_id}/managers"
 )
 
 
@@ -47,6 +52,12 @@ def es_respuesta_lineups(response, partido_id):
     return ruta_esperada in response.url and response.status == 200
 
 
+def es_respuesta_managers(response, partido_id):
+    """Identifica la respuesta de managers del partido actual."""
+    ruta_esperada = f"/api/v1/event/{partido_id}/managers"
+    return ruta_esperada in response.url and response.status == 200
+
+
 def obtener_lineups_desde_endpoint(page, partido_id, timeout=15000):
     """Obtiene lineups directamente usando la sesión abierta del navegador."""
     endpoint = LINEUPS_ENDPOINT_TEMPLATE.format(partido_id=partido_id)
@@ -58,6 +69,27 @@ def obtener_lineups_desde_endpoint(page, partido_id, timeout=15000):
         )
 
     return response.json()
+
+
+def obtener_managers_desde_endpoint(page, partido_id, timeout=15000):
+    """Obtiene managers directamente usando la sesión abierta del navegador."""
+    endpoint = MANAGERS_ENDPOINT_TEMPLATE.format(partido_id=partido_id)
+    response = page.request.get(endpoint, timeout=timeout)
+
+    if not response.ok:
+        raise RuntimeError(
+            f"El endpoint de managers respondió HTTP {response.status}: {endpoint}"
+        )
+
+    datos = response.json()
+    if not isinstance(datos, dict) or not (
+        "homeManager" in datos or "awayManager" in datos
+    ):
+        raise ValueError(
+            "La respuesta de managers no contiene 'homeManager' ni 'awayManager'."
+        )
+
+    return datos
 
 def obtener_lineups(page, partido_id, timeout=15000):
     """
@@ -99,6 +131,49 @@ def obtener_lineups(page, partido_id, timeout=15000):
         )
 
     return obtener_lineups_desde_endpoint(page, partido_id, timeout=timeout)
+
+
+def obtener_lineups_y_managers(page, partido_id, timeout=15000):
+    """Obtiene lineups e intenta capturar managers durante el clic de Lineups."""
+    respuestas_managers = []
+
+    def registrar_managers(response):
+        if es_respuesta_managers(response, partido_id):
+            respuestas_managers.append(response)
+
+    page.on("response", registrar_managers)
+    try:
+        lineups = obtener_lineups(page, partido_id, timeout=timeout)
+        page.wait_for_timeout(500)
+    finally:
+        page.remove_listener("response", registrar_managers)
+
+    managers = None
+    if respuestas_managers:
+        try:
+            managers = respuestas_managers[-1].json()
+            logging.info("JSON de managers interceptado durante el clic en Lineups.")
+        except Exception as error:
+            logging.warning(
+                f"La respuesta interceptada de managers no pudo leerse: {error}"
+            )
+
+    if managers is None:
+        logging.info(
+            "No se interceptó managers durante el clic; consultando el endpoint."
+        )
+        try:
+            managers = obtener_managers_desde_endpoint(
+                page,
+                partido_id,
+                timeout=timeout,
+            )
+        except Exception as error:
+            logging.error(
+                f"No se pudo obtener managers para el partido {partido_id}: {error}"
+            )
+
+    return lineups, managers
 
 def obtener_estadisticas_equipo(page, partido_id, timeout=15000):
     """Abre la pestaña de estadísticas e intercepta el JSON del partido."""
@@ -152,6 +227,7 @@ def procesar_archivo_ronda(nombre_archivo_json):
         page = context.new_page()
 
         lineups_guardados = 0
+        managers_guardados = 0
         estadisticas_guardadas = 0
 
         for indice, url in enumerate(urls_partidos, start=1):
@@ -179,13 +255,31 @@ def procesar_archivo_ronda(nombre_archivo_json):
                 logging.info(
                     "Obteniendo alineaciones y estadísticas individuales..."
                 )
-                lineups_json = obtener_lineups(page, partido_id)
+                lineups_json, managers_json = obtener_lineups_y_managers(
+                    page,
+                    partido_id,
+                )
                 nombre_lineups = (
                     f"lineups_{liga.replace(' ', '_')}_R{ronda}_{partido_id}.json"
                 )
                 guardar_json(lineups_json, PLAYER_STATS_FOLDER, nombre_lineups)
                 lineups_guardados += 1
                 logging.info(f"Lineups guardado correctamente: {nombre_lineups}")
+
+                if managers_json is not None:
+                    nombre_managers = (
+                        f"managers_{liga.replace(' ', '_')}_R{ronda}_"
+                        f"{partido_id}.json"
+                    )
+                    guardar_json(
+                        managers_json,
+                        MANAGERS_FOLDER,
+                        nombre_managers,
+                    )
+                    managers_guardados += 1
+                    logging.info(
+                        f"Managers guardado correctamente: {nombre_managers}"
+                    )
             except Exception as error:
                 logging.error(
                     f"No se pudo obtener lineups para el partido {partido_id}: {error}"
@@ -212,6 +306,7 @@ def procesar_archivo_ronda(nombre_archivo_json):
 
         logging.info(
             f"Lote finalizado: {lineups_guardados}/{len(urls_partidos)} lineups y "
+            f"{managers_guardados}/{len(urls_partidos)} managers y "
             f"{estadisticas_guardadas}/{len(urls_partidos)} estadísticas guardadas."
         )
         logging.info("Cerrando navegador.")
