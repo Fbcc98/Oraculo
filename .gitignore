@@ -1,0 +1,19 @@
+# Datos crudos y bitácoras de ejecución
+data/
+*.log
+
+# Base de datos SQLite local
+database/*.db
+database/*.sqlite*
+
+# Entorno virtual y caché de Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Configuración local de IDEs
+.idea/
+.vscode/
