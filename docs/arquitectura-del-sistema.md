@@ -1,14 +1,14 @@
 # Arquitectura del Sistema y Diseño Técnico
 
 ## Índice de Navegación
-
 1. [Visión Arquitectónica General](#1-visión-arquitectónica-general)
 2. [Estructura de Directorios del Proyecto](#2-estructura-de-directorios-del-proyecto)
 3. [Flujo General de Componentes y Orquestación (`../main.py`)](#3-flujo-general-de-componentes-y-orquestación-mainpy)
 4. [Detalle Técnico — Área 1: Scraping](#4-detalle-técnico--área-1-scraping)
 5. [Módulos Transversales y Herramientas de Soporte](#5-módulos-transversales-y-herramientas-de-soporte)
 6. [Detalle Técnico — Área 2: ETL y Persistencia DDL](#6-detalle-técnico--área-2-etl-y-persistencia-ddl)
-7. [Detalle Técnico — Área 3: Machine Learning (Visión Futura)](#7-detalle-técnico--área-3-machine-learning-visión-futura)
+7. [Detalle Técnico — Área 3: Machine Learning *(Visión Futura)*](#7-detalle-técnico--área-3-machine-learning-visión-futura)
+8. [Registro de Decisiones de Arquitectura (ADRs) e Historial](#8-registro-de-decisiones-de-arquitectura-adrs-e-historial)
 
 ---
 
@@ -42,8 +42,8 @@ oraculo_project/
 ├── main.py                      # Orquestador CLI (menú interactivo, flags argparse y puente Raw -> ETL).
 ├── config.json                  # Parámetros globales (ligas, temporadas, ronda objetivo, delays).
 │
-├── scrapers/                    # Área 1: Extracción de datos (Web Scraping + API)
-│   ├── match_crawler.py         # Descubre URLs de partidos por ronda y descarga eventos de temporada.
+├── scrapers/                    # Área 1: Extracción de datos (Web Scraping + Interceptación XHR)
+│   ├── match_crawler.py         # Descubre URLs de partidos por ronda e intercepta JSON de eventos de jornada.
 │   └── stats_scraper.py         # Extrae alineaciones, entrenadores y estadísticas por partido.
 │
 ├── etl/                         # Área 2: Transformación y Carga Transaccional
@@ -69,7 +69,7 @@ oraculo_project/
 └── data/                        # Almacenamiento local de datos (ignorado en Git)
     └── raw/                     # Capa de datos crudos (Landing Zone)
         ├── urls_league_rounds/  # Listados de URLs de partidos por liga/temporada/ronda.
-        ├── league_events/       # Instantáneas JSON de eventos totales de temporada.
+        ├── league_events/       # Instantáneas JSON de eventos por jornada (round_events_*.json).
         ├── matchs_stats/        # Estadísticas colectivas por partido.
         ├── players_stats/       # Alineaciones y estadísticas individuales.
         └── managers/            # Directores técnicos por partido.
@@ -92,7 +92,7 @@ flowchart TD
 
     subgraph StorageRaw [Almacenamiento Crudo - data/raw/]
         UrlsJSON[(urls_*.json)]
-        EventsJSON[(team_events_total_*.json)]
+        EventsJSON[(round_events_*.json)]
         StatsJSON[(stats_*.json / lineups_*.json / managers_*.json)]
     end
 
@@ -112,7 +112,7 @@ flowchart TD
 
     Main -->|1. Ejecuta descubrimiento| MC
     MC -->|Guarda URLs| UrlsJSON
-    MC -->|Guarda eventos temporada| EventsJSON
+    MC -->|Guarda eventos de jornada| EventsJSON
     
     Main -->|2. Ejecuta extracción detalle| SS
     UrlsJSON -->|Consume URLs| SS
@@ -149,6 +149,7 @@ flowchart TD
    * `python main.py --status`: Imprime el conteo actual de registros de las 11 tablas en SQLite.
 
 #### Procesamiento del Puente Raw $\rightarrow$ ETL (`ejecutar_etl_desde_eventos`)
+> **Nota de transición:** Tras migrar el crawler a `round_events_*.json` (estructura raíz `"events"`), el puente en `main.py` y `MatchProcessor` debe adaptarse desde el formato anterior `team_events_total_*.json` (`"tournamentTeamEvents"`) antes de ejecutar la carga ETL sobre las nuevas rondas.
 1. Lee el archivo `team_events_total_*.json` seleccionado e infiere la `ronda_filtro` desde el nombre del archivo si no se pasa explícitamente.
 2. Construye los diccionarios maestros `PAIS` y `LIGAS` mediante `_extraer_metadatos_competicion()`.
 3. Carga el mapa `{Id_partido: url}` desde el archivo homólogo en `urls_league_rounds/` (`_mapa_urls_ronda()`).
@@ -173,16 +174,16 @@ flowchart TD
 sequenceDiagram
     actor Usuario as main.py / CLI
     participant MC as match_crawler.py
-    participant Web as Sofascore (Chromium + API)
+    participant Web as Sofascore (Chromium + XHR)
     participant FS as data/raw/
     participant SS as stats_scraper.py
 
     Usuario->>MC: run_url_explorer()
-    MC->>Web: Navega a URL de Liga/Temporada
-    MC->>Web: GET /api/v1/.../team-events/total
-    Web-->>MC: JSON eventos temporada
-    MC->>FS: Guarda team_events_total_*.json
-    MC->>Web: Selecciona "Round N" en DOM y extrae hrefs
+    MC->>Web: Registra listener pasivo page.on("response")
+    MC->>Web: Navega a URL de Liga/Temporada y selecciona "Round N"
+    Web-->>MC: XHR /api/v1/.../events/round/N (200 OK)
+    MC->>FS: Guarda round_events_*_ronda_N.json
+    MC->>Web: Extrae hrefs de #tabpanel-round
     MC->>FS: Guarda urls_*_ronda_N.json
 
     Usuario->>SS: procesar_archivo_ronda(archivo_urls)
@@ -196,9 +197,8 @@ sequenceDiagram
     end
 ```
 
-### 4.1 Módulo `../scrapers/match_crawler.py`
-
-* **Responsabilidad Principal:** Actuar como el explorador inicial de cada competición configurada. Descubre las URLs de los partidos correspondientes a la jornada objetivo mediante interacción con el DOM y descarga una instantánea completa de los eventos de la temporada desde la API interna.
+### 4.1 Módulo `scrapers/match_crawler.py`
+* **Responsabilidad Principal:** Actuar como el explorador inicial de cada competición configurada. Intercepta desde el tráfico de red del navegador el JSON estructurado de la jornada objetivo (`/events/round/{ronda}`) y descubre las URLs de los partidos correspondientes.
 * **Punto de Entrada:** `run_url_explorer()`
 
 #### Criterios de Entrada (Inputs)
@@ -209,24 +209,25 @@ sequenceDiagram
 
 #### Procesamiento Interno
 1. Inicia una instancia visible de Chromium mediante `sync_playwright()`.
-2. Itera sobre cada liga y temporada configurada, navegando a `https://www.sofascore.com/tournament/football/{country}/{league}/{tournament_id}#id:{season_id}`.
-3. **Captura de eventos de temporada (`obtener_team_events_total`):** Realiza una petición directa (`page.request.get`) al endpoint `/api/v1/unique-tournament/{tournament_id}/season/{season_id}/team-events/total` aprovechando la sesión del navegador.
-4. **Descubrimiento en el DOM:** Localiza el selector de rondas (`combobox`), despliega la lista si es necesario, selecciona `"Round {ronda_objetivo}"` y extrae todos los enlaces únicos que contengan `/match/` dentro de `#tabpanel-round` (con selectores de respaldo).
+2. Itera sobre cada liga y temporada configurada, registrando **antes de navegar** el listener pasivo `crear_interceptor_ronda(page, tournament_id, season_id, ronda_objetivo)` sobre `/api/v1/unique-tournament/{tournament_id}/season/{season_id}/events/round/{ronda}`.
+3. Navega a `https://www.sofascore.com/tournament/football/{country}/{league}/{tournament_id}#id:{season_id}`, localiza el selector de rondas (`combobox`) y selecciona `"Round {ronda_objetivo}"` (cubriendo tanto respuestas disparadas por el clic como respuestas precargadas en caché al abrir la temporada).
+4. **Persistencia con espera activa (`guardar_eventos_ronda`):** Sondea el estado de captura cada `250 ms` (hasta `12000 ms`) para evitar condiciones de carrera con la red y persiste el payload JSON cuando contiene la clave `"events"`.
+5. **Descubrimiento en el DOM:** Extrae todos los enlaces únicos que contengan `/match/` dentro de `#tabpanel-round` (con selectores de respaldo).
 
 #### Criterios de Salida (Outputs)
 Genera dos artefactos JSON en disco por cada combinación válida de liga, temporada y ronda:
-1. **Índice de URLs de la ronda:**
+1. **Instantánea de eventos de la ronda:**
+   * **Ruta:** `data/raw/league_events/round_events_{country}_{league}_{season}_ronda_{ronda}.json`
+   * **Estructura:** Respuesta JSON cruda con la llave raíz `"events"` (lista de encuentros de la jornada con equipos, marcadores, estado y `startTimestamp` UTC) y `"hasNextPage"`.
+2. **Índice de URLs de la ronda:**
    * **Ruta:** `data/raw/urls_league_rounds/urls_{country}_{league}_{season}_ronda_{ronda}.json`
    * **Estructura:** Diccionario con metadatos (`liga`, `pais`, `temporada`, `ronda`) y la lista deduplicada `urls` (`list[str]`).
-2. **Instantánea de eventos de temporada:**
-   * **Ruta:** `data/raw/league_events/team_events_total_{country}_{league}_{season}_ronda_{ronda}.json`
-   * **Estructura:** Respuesta JSON cruda con la llave raíz `tournamentTeamEvents` (insumo clave para reconstruir contexto de partidos en el ETL).
 
 #### Gestión de Errores y Resiliencia
-* **Fallo en carga de página o interacción con el menú de rondas:** Captura la excepción, registra el error en el `logger` y ejecuta `continue` para saltar a la siguiente temporada sin abortar el lote completo.
-* **Fallo en `team-events/total`:** Registra el error HTTP o de estructura (`ValueError`) en el log y continúa con la extracción de URLs en el DOM.
+* **Aislamiento por temporada (`try / finally`):** Garantiza que `page.remove_listener("response", listener_ronda)` se ejecute siempre al salir de cada temporada para evitar acumulación de listeners entre iteraciones.
+* **Fallo en carga de página o interacción con el menú de rondas:** Captura la excepción, registra el error en el logger y ejecuta `continue` para saltar a la siguiente temporada sin abortar el lote completo.
 
-### 4.2 Módulo `../scrapers/stats_scraper.py`
+### 4.2 Módulo `scrapers/stats_scraper.py`
 
 * **Responsabilidad Principal:** Consumir los archivos de URLs generados por el crawler, visitar cada encuentro individual y extraer tres bloques de información cruda: alineaciones/jugadores, directores técnicos y estadísticas colectivas del equipo.
 * **Punto de Entrada:** `procesar_archivo_ronda(nombre_archivo_json: str)`
@@ -554,3 +555,22 @@ Método de alto nivel `cargar_partido(paises, liga, equipos, partido, datos_matc
 
 * **Estado:** Pendiente de inicio (bloqueado hasta completar la carga piloto y estabilizar el histórico en `../database/oraculo.db`).
 * **Principio de Diseño:** El módulo `../ml_models` operará como un consumidor de solo lectura sobre SQLite. Tendrá prohibido leer directamente archivos JSON de `../data/raw` para garantizar que tanto el entrenamiento como las predicciones pre-partido utilicen datos validados y normalizados por el pipeline ETL.
+
+---
+
+## 8. Registro de Decisiones de Arquitectura (ADRs) e Historial
+
+### 8.1 Decisiones Técnicas Vigentes
+
+| ID | Decisión | Contexto y Justificación | Impacto en el Sistema |
+| :--- | :--- | :--- | :--- |
+| **ADR-01** | **Estructuras nativas (`dict`) en lugar de `Pandas` en el ETL** | El pipeline procesa encuentros unitarios mediante transacciones `UPSERT` por partido en SQLite. | Elimina sobrecarga de memoria y dependencias innecesarias en `etl/`. |
+| **ADR-02** | **Interceptación pasiva XHR (`page.on("response")`) para eventos de ronda** | Las peticiones directas `page.request.get` a endpoints de torneo (`/team-events/total` y `/events/round/{ronda}`) son bloqueadas con HTTP `403` por Sofascore, mientras que las peticiones XHR del navegador pasan con HTTP `200`. | `match_crawler.py` captura `round_events_*.json` limpio (10 partidos por ronda) con espera activa de `250 ms` para evitar condiciones de carrera. |
+| **ADR-03** | **Desacoplamiento de localía en `PARTIDOS_EQUIPOS`** | Mover `Id_equipo_local` e `Id_equipo_visita` fuera de `PARTIDOS` hacia una tabla puente con `Condicion_local`. | Simplifica consultas agregadas por equipo (local, visita o total) y evita duplicar lógica en SQL. |
+
+### 8.2 Historial de Modificaciones del Documento
+
+| Versión | Fecha | Descripción del Cambio |
+| :--- | :--- | :--- |
+| **1.0** | 2026-11-15 | Versión inicial detallando macro-áreas, módulos de scraping, clases ETL, DDL y orquestación CLI en `main.py`. |
+| **1.1** | 2026-11-22 | Actualización de `scrapers/match_crawler.py` (migración de `team_events_total_*.json` a `round_events_*.json` vía interceptor XHR) e incorporación de las decisiones técnicas (ADRs) e historial. |
