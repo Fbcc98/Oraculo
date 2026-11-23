@@ -149,15 +149,14 @@ flowchart TD
    * `python main.py --status`: Imprime el conteo actual de registros de las 11 tablas en SQLite.
 
 #### Procesamiento del Puente Raw $\rightarrow$ ETL (`ejecutar_etl_desde_eventos`)
-> **Nota de transición:** Tras migrar el crawler a `round_events_*.json` (estructura raíz `"events"`), el puente en `main.py` y `MatchProcessor` debe adaptarse desde el formato anterior `team_events_total_*.json` (`"tournamentTeamEvents"`) antes de ejecutar la carga ETL sobre las nuevas rondas.
-1. Lee el archivo `team_events_total_*.json` seleccionado e infiere la `ronda_filtro` desde el nombre del archivo si no se pasa explícitamente.
-2. Construye los diccionarios maestros `PAIS` y `LIGAS` mediante `_extraer_metadatos_competicion()`.
-3. Carga el mapa `{Id_partido: url}` desde el archivo homólogo en `urls_league_rounds/` (`_mapa_urls_ronda()`).
-4. Invoca `MatchProcessor().procesar_eventos_total(...)` para obtener los eventos finalizados deduplicados de la jornada.
+1. Lee el archivo `round_events_*.json` seleccionado (raíz `"events"`, una `list[dict]`) e infiere la `ronda_filtro` desde el nombre del archivo si no se pasa explícitamente. El flujo completo espera `round_events_{pais_slug}_{liga_slug}_{temp_slug}_ronda_{ronda}.json`.
+2. Construye los diccionarios maestros `PAIS` y `LIGAS` mediante `_extraer_metadatos_competicion()`, tomando el primer objeto de `events` con un torneo no vacío. Si no hay eventos válidos, lanza `PipelineError`.
+3. Carga el mapa `{Id_partido: url}` desde el archivo homólogo en `urls_league_rounds/` (`_mapa_urls_ronda()`), reemplazando el prefijo `round_events_` por `urls_` una sola vez.
+4. Invoca `MatchProcessor().procesar_eventos_ronda(...)` para obtener los eventos finalizados deduplicados de la jornada; si se indica una ronda, compara `roundInfo.round` cuando el evento la informa.
 5. Por cada encuentro finalizado, busca en disco sus archivos correspondientes (`_buscar_archivo_partido()`) priorizando la ronda exacta (`_R{ronda}_{partido_id}.json`):
    * `matchs_stats/` (obligatorio; si falta, omite el partido y lo contabiliza en el resumen).
    * `players_stats/` y `managers/` (opcionales).
-6. Arma la lista de casos con su `contexto` completo e invoca `Pipeline(loader=Loader(db_path=DB_PATH, inicializar=True)).procesar_lote(casos, continuar_con_error=True)`.
+6. Arma la lista de casos con su `contexto` completo (`paises`, `liga`, `equipos` con `Id_pais`, `partido`, `partidos_equipos`, `id_equipo_local` e `id_equipo_visita`) e invoca `Pipeline(loader=Loader(db_path=DB_PATH, inicializar=True)).procesar_lote(casos, continuar_con_error=True)`. Los IDs de equipos proceden de `homeTeam.id` y `awayTeam.id`; los marcadores ausentes permanecen como `None` (`NULL` en SQLite).
 
 #### Criterios de Salida (Outputs)
 * Imprime un resumen de ejecución indicando partidos cargados con éxito, partidos omitidos por falta de estadísticas y errores individuales registrados en `../oraculo_scraper.log`.
@@ -299,7 +298,7 @@ classDiagram
 
     class MatchProcessor {
         +procesar_evento(json_data, id_liga, url) dict
-        +procesar_eventos_total(json_data, id_liga, ronda, urls) list~dict~
+        +procesar_eventos_ronda(json_data, id_liga, ronda, urls) list~dict~
         +procesar(json_data, id_partido, id_equipo_local, id_equipo_visita) list~dict~
     }
 
@@ -418,16 +417,18 @@ Método principal `procesar_partido(contexto, match_json, player_json=None, mana
 ### 6.2 Clase `MatchProcessor` (`../etl/match_processor.py`)
 
 * **Responsabilidad Principal:** Cumple una doble función de normalización sobre los datos del encuentro:
-  1. Transforma metadatos de eventos finalizados (tanto unitarios como desde `team-events/total`) para construir el contexto de partido, equipos y marcadores.
+  1. Transforma metadatos de eventos finalizados (tanto unitarios como desde la lista `"events"` de `round_events_*.json`) para construir el contexto de partido, equipos y marcadores, sin almacenar estado entre llamadas.
   2. Aplana las estadísticas colectivas por período (`ALL`, `1ST`, `2ST`) provenientes de `../data/raw/matchs_stats`.
 
 #### Criterios de Entrada (Inputs)
 * **Para estadísticas (`procesar`):** `json_data` (`dict` con llave `"statistics"`), `id_partido` (`int`), `id_equipo_local` (`int`), `id_equipo_visita` (`int`).
-* **Para metadatos (`procesar_evento` / `procesar_eventos_total`):** `json_data` (`dict` de evento o de `tournamentTeamEvents`), `id_liga` (`int`), `ronda` (`int | None`), `urls` (`dict[int, str] | None`).
+* **Para un evento (`procesar_evento(json_data, id_liga, url=None)`):** `json_data` (`dict` de evento directo o envuelto en `"event"`), `id_liga` (`int`), `url` (`str | None`).
+* **Para una ronda (`procesar_eventos_ronda(json_data, id_liga, ronda=None, urls=None)`):** `json_data` (`dict` con `"events": list[dict]` proveniente de `round_events_*.json`), `id_liga` (`int`), `ronda` (`int | None`), `urls` (`dict[int, str] | None`).
 
 #### Procesamiento Interno
-1. **Normalización de Eventos (`procesar_evento` / `procesar_eventos_total`):**
-   * Deduplica eventos por `event.id` y filtra estrictamente aquellos con `status.type == "finished"`.
+1. **Normalización de Eventos (`procesar_evento` / `procesar_eventos_ronda`):**
+   * Filtra estrictamente aquellos con `status.type == "finished"` y, si se indica una ronda, exige coincidencia con `roundInfo.round` cuando está presente. Deduplica por `event.id`, conservando la primera aparición que cumple los filtros, y reutiliza `procesar_evento()`.
+   * Extrae explícitamente los IDs estables de Sofascore desde `homeTeam.id` y `awayTeam.id`, sin inferirlos de slugs ni URLs.
    * Resuelve el marcador final buscando en orden `display` $\rightarrow$ `current` $\rightarrow$ `normaltime` sin convertir ausencias en cero.
    * Convierte `startTimestamp` a formato ISO 8601 UTC (`Fecha_hora_utc`) y construye la URL canónica si no se provee.
 2. **Normalización de Estadísticas (`procesar`):**
@@ -438,9 +439,11 @@ Método principal `procesar_partido(contexto, match_json, player_json=None, mana
 #### Criterios de Salida (Outputs)
 * `procesar(...)` retorna `list[dict]` con 2 registros por período (6 registros en un partido estándar con `ALL`, `1ST`, `2ST`), listos para la tabla `PARTIDOS_ESTADISTICAS`.
 * `procesar_evento(...)` retorna `dict` con llaves: `"partido"`, `"equipos"`, `"partidos_equipos"`, `"id_equipo_local"`, `"id_equipo_visita"`.
+* `procesar_eventos_ronda(...)` retorna una `list[dict]` con esos contextos normalizados, sin duplicados; una lista de eventos vacía produce `[]`.
 
 #### Gestión de Errores y Resiliencia
 * En `procesar_evento`, lanza `ValueError` si el partido no está finalizado (`status.type != "finished"`) o si faltan campos críticos (`event.id`, `homeTeam.id`, `awayTeam.id`, `startTimestamp`).
+* En `procesar_eventos_ronda`, exige una lista `events` y una ronda convertible a entero si se proporciona; de lo contrario, lanza `ValueError`. Omite entradas que no sean objetos o carezcan de `event.id` válido, registrando advertencias mediante `logging`.
 * En `procesar`, si una estadística puntual no viene en el JSON de Sofascore, simplemente no se añade al diccionario, permitiendo que SQLite la almacene como `NULL`.
 
 ### 6.3 Clase `PlayerProcessor` (`../etl/player_processor.py`)
@@ -574,3 +577,4 @@ Método de alto nivel `cargar_partido(paises, liga, equipos, partido, datos_matc
 | :--- | :--- | :--- |
 | **1.0** | 2026-11-15 | Versión inicial detallando macro-áreas, módulos de scraping, clases ETL, DDL y orquestación CLI en `main.py`. |
 | **1.1** | 2026-11-22 | Actualización de `scrapers/match_crawler.py` (migración de `team_events_total_*.json` a `round_events_*.json` vía interceptor XHR) e incorporación de las decisiones técnicas (ADRs) e historial. |
+| **1.2** | 2026-11-22 | Adaptación del puente ETL en `main.py` y de `MatchProcessor` a `round_events_*.json` (`"events"`), construcción automática del contexto completo y cierre de la transición desde el formato legado. |
