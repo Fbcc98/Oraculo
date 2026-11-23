@@ -5,7 +5,12 @@
     "delay_min_match": 5,
     "delay_max_match": 10,
     "user_agent_default": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "ronda_objetivo": 3
+    "ronda_objetivo": 38,
+    "browser_recycle_rounds": 5,
+    "browser_recycle_matches": 50,
+    "circuit_breaker_threshold": 3,
+    "cooldown_min_seconds": 60,
+    "cooldown_max_seconds": 90
   },
   "leagues": [
     {
