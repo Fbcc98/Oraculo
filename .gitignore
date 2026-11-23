@@ -1,6 +1,7 @@
 # Datos crudos y bitácoras de ejecución
-data/
+data/raw
 *.log
+.obsidian/
 
 # Base de datos SQLite local
 database/*.db
