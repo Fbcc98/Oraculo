@@ -256,5 +256,48 @@ class ResilienciaTests(unittest.TestCase):
 
 
 
+    def test_auditoria_reintenta_solo_pendientes_y_reaudita(self):
+        self.fixture(["finished", "finished", "notstarted"])
+        self.artefactos(1)
+        with patch.object(main, "procesar_archivo_ronda") as procesar:
+            resultado = main.auditar_y_reintentar_pendientes(ejecutar_reintento=False)
+            procesar.assert_not_called()
+            self.assertEqual([p["partido_id"] for p in resultado["pendientes"]], ["2"])
+            procesar.side_effect = lambda *args, **kwargs: self.artefactos(2)
+            resultado = main.auditar_y_reintentar_pendientes()
+            procesar.assert_called_once_with(self.nombre, solo_ids=["2"])
+            self.assertEqual(resultado["pendientes"], [])
+        (self.urls_path.parent / "urls_corrupto.json").write_text("{", encoding="utf-8")
+        resultado = main.auditar_y_reintentar_pendientes(ejecutar_reintento=False)
+        self.assertEqual(len(resultado["errores"]), 1)
+        self.assertEqual(len(resultado["archivos"]), 1)
+
+    def test_flujo_multironda_sin_sqlite(self):
+        with patch.object(main, "run_url_explorer") as explorar, \
+                patch.object(main.os.path, "exists", return_value=True), \
+                patch.object(main, "procesar_archivo_ronda", return_value={"incompletos": []}) as procesar, \
+                patch.object(main, "ejecutar_etl_desde_eventos") as etl:
+            self.assertEqual(main.ejecutar_flujo_completo(), [])
+            explorar.assert_called_once_with(rondas_override=[1, 2, 3])
+            self.assertEqual(procesar.call_count, 3)
+            self.assertEqual([c.kwargs["ronda_filtro"] for c in etl.call_args_list], [1, 2, 3])
+
+    def test_auditoria_preserva_pendientes_si_falla_reintento(self):
+        self.fixture(["finished"])
+        with patch.object(main, "procesar_archivo_ronda", side_effect=OSError("fallo")):
+            resultado = main.auditar_y_reintentar_pendientes(self.nombre)
+        self.assertEqual(len(resultado["errores"]), 1)
+        self.assertEqual(len(resultado["pendientes"]), 1)
+
+    def test_cli_retry_con_y_sin_archivo(self):
+        for argumentos, esperado in [(["--retry-pending"], None),
+                                     (["--retry-pending", self.nombre], self.nombre)]:
+            with patch("sys.argv", ["main.py"] + argumentos), \
+                    patch.object(main, "setup_logger"), \
+                    patch.object(main, "auditar_y_reintentar_pendientes") as auditar:
+                main.main()
+                auditar.assert_called_once_with(esperado)
+
+
 if __name__ == "__main__":
     unittest.main()
