@@ -11,9 +11,10 @@ from etl.common import Common
 from etl.loader import ORDEN_CARGA, Loader
 from etl.match_processor import MatchProcessor
 from etl.pipeline import Pipeline, PipelineError
+from scrapers.artifact_store import auditar_archivo_ronda
 from scrapers.match_crawler import normalizar_nombre_directorio, run_url_explorer
 from scrapers.stats_scraper import procesar_archivo_ronda
-from utils.json_reader import load_config
+from utils.json_reader import load_config, parsear_rondas_objetivo
 from utils.logger import setup_logger
 from utils.schema_explorer import elegir_carpeta, explorar_carpeta
 
@@ -266,35 +267,97 @@ def ejecutar_etl_desde_eventos(nombre_archivo_eventos, ronda_filtro=None):
 
 
 def ejecutar_flujo_completo():
-    """Ejecuta Scraping Etapa 1 -> Scraping Etapa 2 -> ETL SQLite según config.json."""
+    """Descubre todas las rondas y ejecuta detalle y ETL por cada jornada."""
     config = load_config()
-    ronda = config["scraping_settings"].get("ronda_objetivo", 1)
+    rondas = parsear_rondas_objetivo(
+        config["scraping_settings"].get("ronda_objetivo", 1)
+    )
 
-    print(f"\n[1/3] Descubriendo partidos y eventos (Ronda {ronda})...")
-    run_url_explorer()
+    print(f"\n[1/3] Descubriendo partidos y eventos (Rondas {rondas})...")
+    run_url_explorer(rondas_override=rondas)
+    pendientes = []
 
-    print(f"\n[2/3] Descargando estadísticas, alineaciones y managers (Ronda {ronda})...")
     for league in config.get("leagues", []):
         pais_slug = normalizar_nombre_directorio(league["country"])
         liga_slug = normalizar_nombre_directorio(league["name"])
 
         for season in league.get("seasons", []):
             temp_slug = normalizar_nombre_directorio(season["year"])
-            archivo_urls = f"urls_{pais_slug}_{liga_slug}_{temp_slug}_ronda_{ronda}.json"
-            archivo_eventos = (
-                f"round_events_{pais_slug}_{liga_slug}_{temp_slug}_ronda_{ronda}.json"
+            for ronda in rondas:
+                sufijo = f"{pais_slug}_{liga_slug}_{temp_slug}_ronda_{ronda}.json"
+                archivo_urls = f"urls_{sufijo}"
+                archivo_eventos = f"round_events_{sufijo}"
+                print(f"\n[2/3] Descargando detalle: {league['name']}, ronda {ronda}...")
+                if os.path.exists(os.path.join(URLS_DIR, archivo_urls)):
+                    try:
+                        resumen = procesar_archivo_ronda(archivo_urls)
+                        pendientes.extend(
+                            {**item, "archivo_urls": archivo_urls}
+                            for item in resumen["incompletos"]
+                        )
+                    except (OSError, ValueError, KeyError) as error:
+                        logging.error("No se pudo procesar %s: %s", archivo_urls, error)
+                else:
+                    logging.warning("No se generó %s; se omite descarga.", archivo_urls)
+
+                print(f"\n[3/3] Cargando SQLite: {league['name']}, ronda {ronda}...")
+                if os.path.exists(os.path.join(EVENTS_DIR, archivo_eventos)):
+                    try:
+                        ejecutar_etl_desde_eventos(archivo_eventos, ronda_filtro=ronda)
+                    except (OSError, ValueError, sqlite3.Error) as error:
+                        logging.error("ETL %s: %s", archivo_eventos, error)
+                else:
+                    logging.warning("No se encontró %s para carga ETL.", archivo_eventos)
+    _reportar_pendientes(pendientes)
+    return pendientes
+
+
+def _reportar_pendientes(pendientes):
+    logging.info("Resumen consolidado: %s partidos pendientes de scraping.", len(pendientes))
+    for item in pendientes:
+        logging.warning(
+            "%s | partido %s | %s | faltantes: %s",
+            item["archivo_urls"], item["partido_id"], item["url"],
+            ", ".join(item["faltantes"]),
+        )
+
+
+def auditar_y_reintentar_pendientes(archivo_urls=None, ejecutar_reintento=True):
+    """Audita uno o todos los índices; reintenta solo IDs finalizados incompletos.
+
+    Retorna resúmenes posteriores al reintento, pendientes consolidados y errores
+    de lectura separados. Un índice corrupto no detiene los demás archivos.
+    """
+    archivos = [os.fspath(archivo_urls)] if archivo_urls is not None else [
+        nombre for nombre in _listar_json(URLS_DIR) if nombre.startswith("urls_")
+    ]
+    resultado = {"archivos": {}, "pendientes": [], "errores": []}
+    for archivo in archivos:
+        try:
+            resumen = auditar_archivo_ronda(os.path.join(URLS_DIR, archivo), RAW_DIR)
+            if ejecutar_reintento and resumen["incompletos"]:
+                ids = [item["partido_id"] for item in resumen["incompletos"]]
+                try:
+                    procesar_archivo_ronda(archivo, solo_ids=ids)
+                except (OSError, ValueError, KeyError) as error:
+                    logging.error("Reintento %s: %s", archivo, error)
+                    resultado["errores"].append({
+                        "archivo_urls": archivo, "error": str(error),
+                    })
+                resumen = auditar_archivo_ronda(os.path.join(URLS_DIR, archivo), RAW_DIR)
+            resultado["archivos"][archivo] = resumen
+            resultado["pendientes"].extend(
+                {**item, "archivo_urls": archivo} for item in resumen["incompletos"]
             )
-
-            if os.path.exists(os.path.join(URLS_DIR, archivo_urls)):
-                procesar_archivo_ronda(archivo_urls)
-            else:
-                logging.warning(f"No se generó {archivo_urls}; se omite descarga.")
-
-            print(f"\n[3/3] Cargando datos en SQLite para {league['name']} ({season['year']})...")
-            if os.path.exists(os.path.join(EVENTS_DIR, archivo_eventos)):
-                ejecutar_etl_desde_eventos(archivo_eventos, ronda_filtro=ronda)
-            else:
-                logging.warning(f"No se encontró {archivo_eventos} para carga ETL.")
+        except (OSError, ValueError, KeyError) as error:
+            logging.error("Auditoría %s: %s", archivo, error)
+            resultado["errores"].append({"archivo_urls": archivo, "error": str(error)})
+    _reportar_pendientes(resultado["pendientes"])
+    if resultado["errores"]:
+        logging.warning(
+            "%s errores de auditoría/reintento.", len(resultado["errores"])
+        )
+    return resultado
 
 
 def ver_estado_base_datos():
@@ -350,7 +413,8 @@ def mostrar_menu_principal():
     print("  2. Cargar datos descargados a SQLite (Solo ETL)")
     print("  3. Solo Scraping - Etapa 1: URLs y Eventos de Liga")
     print("  4. Solo Scraping - Etapa 2: Stats, Lineups y Managers")
-    print("  5. Diagnóstico y Base de Datos (JSON / SQLite)")
+    print("  5. Auditar / Reintentar partidos pendientes de Scraping")
+    print("  6. Diagnóstico y Base de Datos (JSON / SQLite)")
     print("  0. Salir")
     print("=" * 52)
 
@@ -358,7 +422,7 @@ def mostrar_menu_principal():
 def ejecutar_menu_interactivo():
     while True:
         mostrar_menu_principal()
-        opcion = input("\nSelecciona una opción (0-5): ").strip()
+        opcion = input("\nSelecciona una opción (0-6): ").strip()
 
         if opcion == "1":
             ejecutar_flujo_completo()
@@ -382,6 +446,9 @@ def ejecutar_menu_interactivo():
                 procesar_archivo_ronda(archivo_urls)
 
         elif opcion == "5":
+            auditar_y_reintentar_pendientes()
+
+        elif opcion == "6":
             menu_diagnostico()
 
         elif opcion == "0":
@@ -389,7 +456,7 @@ def ejecutar_menu_interactivo():
             break
 
         else:
-            print("\nOpción no válida. Selecciona un número del 0 al 5.")
+            print("\nOpción no válida. Selecciona un número del 0 al 6.")
 
 
 def main():
@@ -400,7 +467,7 @@ def main():
     parser.add_argument(
         "--full",
         action="store_true",
-        help="Ejecuta el flujo completo (Scraping + ETL) para la ronda en config.json.",
+        help="Ejecuta el flujo completo (Scraping + ETL) para las rondas en config.json.",
     )
     parser.add_argument(
         "--etl",
@@ -419,6 +486,13 @@ def main():
         action="store_true",
         help="Muestra el conteo de registros por tabla en SQLite.",
     )
+    parser.add_argument(
+        "--retry-pending",
+        metavar="ARCHIVO_URLS",
+        nargs="?",
+        const="__AUTO__",
+        help="Audita y reintenta partidos incompletos de un índice URLs o de todos.",
+    )
     args = parser.parse_args()
 
     if args.init_db:
@@ -427,6 +501,10 @@ def main():
         ver_estado_base_datos()
     elif args.full:
         ejecutar_flujo_completo()
+    elif args.retry_pending:
+        auditar_y_reintentar_pendientes(
+            None if args.retry_pending == "__AUTO__" else args.retry_pending
+        )
     elif args.etl:
         if args.etl == "__AUTO__":
             archivos = _listar_json(EVENTS_DIR)
