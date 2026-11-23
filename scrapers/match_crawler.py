@@ -1,251 +1,137 @@
-import sys
-import os
-import json
+"""Descubrimiento multironda a partir del JSON de eventos de Sofascore."""
+
 import logging
+from pathlib import Path
 
-base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(base_dir)
-
-from utils.json_reader import load_config
-from utils.base import random_sleep
-from utils.logger import setup_logger
-from playwright.sync_api import sync_playwright
-
-setup_logger()
-
-data_dir = os.path.join(base_dir, 'data', 'raw', 'urls_league_rounds')
-raw_league_events_dir = os.path.join(base_dir, 'data', 'raw', 'league_events')
-os.makedirs(data_dir, exist_ok=True)
-os.makedirs(raw_league_events_dir, exist_ok=True)
-
-TEAM_EVENTS_TOTAL_ENDPOINT = (
-    "https://www.sofascore.com/api/v1/unique-tournament/"
-    "{tournament_id}/season/{season_id}/team-events/total"
+from scrapers.artifact_store import eventos_validos, guardar_json_atomico
+from scrapers.browser_client import (
+    BrowserClient, click_defensivo, esperar_capturas, fetch_json,
+    registrar_captura, retirar_captura,
 )
+from utils.base import random_sleep
+from utils.json_reader import load_config, parsear_rondas_objetivo
 
 
-def crear_interceptor_ronda(page, tournament_id, season_id, ronda):
-    """Registra un listener pasivo que captura el JSON de /events/round/{ronda}."""
-    endpoint_objetivo = (
-        f"/api/v1/unique-tournament/{tournament_id}/season/{season_id}/events/round/{ronda}"
-    )
-    captura = {"data": None, "status": None}
+BASE_DIR = Path(__file__).resolve().parent.parent
+data_dir = BASE_DIR / "data" / "raw" / "urls_league_rounds"
+raw_league_events_dir = BASE_DIR / "data" / "raw" / "league_events"
 
-    def manejar_respuesta(response):
-        if endpoint_objetivo in response.url:
-            captura["status"] = response.status
-            if response.status == 200:
-                try:
-                    payload = response.json()
-                    if isinstance(payload, dict) and "events" in payload:
-                        captura["data"] = payload
-                        logging.info(
-                            f"JSON de ronda {ronda} interceptado desde red "
-                            f"({len(payload['events'])} partidos)."
-                        )
-                except Exception as exc:
-                    logging.warning(
-                        f"No se pudo decodificar JSON de ronda {ronda}: {exc}"
-                    )
-
-    page.on("response", manejar_respuesta)
-    return captura, manejar_respuesta
-
-
-def guardar_eventos_ronda(
-    page,
-    captura,
-    ronda,
-    ruta_salida,
-    timeout_ms=12000,
-):
-    """Espera a que el interceptor capture el JSON de la ronda y lo guarda en disco."""
-    tiempo_esperado = 0
-    intervalo_ms = 250
-
-    while captura.get("data") is None and tiempo_esperado < timeout_ms:
-        page.wait_for_timeout(intervalo_ms)
-        tiempo_esperado += intervalo_ms
-
-    datos = captura.get("data")
-    if not datos or "events" not in datos:
-        logging.warning(
-            f"No se recibió un JSON válido con 'events' para la ronda {ronda} "
-            f"tras {timeout_ms / 1000:.1f}s (status HTTP: {captura.get('status')})."
-        )
-        return False
-
-    os.makedirs(os.path.dirname(ruta_salida), exist_ok=True)
-    with open(ruta_salida, "w", encoding="utf-8") as archivo:
-        json.dump(datos, archivo, ensure_ascii=False, indent=2)
-
-    logging.info(
-        f"JSON de ronda guardado en {ruta_salida} ({len(datos['events'])} eventos)."
-    )
-    return True
 
 def normalizar_nombre_directorio(valor):
     """Normaliza nombres usados en la jerarquía de datos crudos."""
-    return valor.strip().lower().replace(" ", "-").replace("/", "-")
+    return str(valor).strip().lower().replace(" ", "-").replace("/", "-")
 
-def run_url_explorer():
-    logging.info("Iniciando Oráculo - Explorador de URLs...")
+
+def construir_urls_eventos(datos):
+    """Construye URLs canónicas desde events, deduplicadas por ID de partido."""
+    if not eventos_validos(datos):
+        raise ValueError("La respuesta de la ronda debe contener una lista events.")
+    urls, vistos = [], set()
+    for evento in datos["events"]:
+        if not isinstance(evento, dict):
+            logging.warning("Evento inválido en la ronda: %r", evento)
+            continue
+        pid, slug, custom_id = (evento.get(k) for k in ("id", "slug", "customId"))
+        if (
+            type(pid) is not int or pid < 1
+            or not isinstance(slug, str) or not slug.strip()
+            or not isinstance(custom_id, str) or not custom_id.strip()
+        ):
+            logging.warning(
+                "Evento %s sin id, slug o customId válido; se omite URL.", pid
+            )
+            continue
+        if pid not in vistos:
+            vistos.add(pid)
+            urls.append(
+                f"https://www.sofascore.com/football/match/{slug}/{custom_id}#id:{pid}"
+            )
+    return urls
+
+
+def _seleccionar_ronda(page, ronda):
+    opcion = page.get_by_role("option", name=f"Round {ronda}", exact=True)
+    if not opcion.is_visible():
+        click_defensivo(
+            page, page.get_by_role("combobox", name="Select item in event list")
+        )
+    click_defensivo(page, opcion)
+
+
+def run_url_explorer(rondas_override=None):
+    """Visita cada temporada una vez por sesión y persiste eventos y URLs por ronda."""
     config = load_config()
-    settings = config['scraping_settings']
-    leagues = config['leagues']
-    ronda_objetivo = settings.get('ronda_objetivo', 1)
-
-    with sync_playwright() as p:
-        logging.info("Levantando navegador Chromium...")
-        browser = p.chromium.launch(headless=False, args=['--start-maximized'])
-
-        context = browser.new_context(no_viewport=True)
-        page = context.new_page()
-        logging.info("Navegador iniciado correctamente.")
-
-        for league in leagues:
-            logging.info("=======================================")
-            logging.info(f"🏆 Explorando Liga: {league['name']}")
-
-            for season in league['seasons']:
-                tournament_id = league['tournament_id']
-                season_id = season['season_id']
-                country = league['country'].lower()
-                league_name_url = league['name'].lower().replace(" ", "-")
-
-                pais_slug = normalizar_nombre_directorio(league["country"])
-                liga_slug = normalizar_nombre_directorio(league["name"])
-                temp_slug = normalizar_nombre_directorio(season["year"])
-
-                logging.info(
-                    f"📅 Temporada {season['year']} | Buscando URLs de la Ronda {ronda_objetivo}..."
-                )
-
-                url = (
+    settings = config["scraping_settings"]
+    rondas = parsear_rondas_objetivo(
+        settings.get("ronda_objetivo", 1)
+        if rondas_override is None else rondas_override
+    )
+    with BrowserClient(settings.get("browser_recycle_rounds", 5)) as cliente:
+        for league in config["leagues"]:
+            pais = normalizar_nombre_directorio(league["country"])
+            liga = normalizar_nombre_directorio(league["name"])
+            tournament_id = league["tournament_id"]
+            for season in league["seasons"]:
+                temp = normalizar_nombre_directorio(season["year"])
+                season_id = season["season_id"]
+                url_base = (
                     f"https://www.sofascore.com/tournament/football/"
-                    f"{country}/{league_name_url}/{tournament_id}#id:{season_id}"
+                    f"{pais}/{liga}/{tournament_id}#id:{season_id}"
                 )
-                logging.info("Navegando a la URL base de la liga...")
-
-                # 1. Activar el interceptor ANTES de navegar y hacer clic en la ronda
-                captura_ronda, listener_ronda = crear_interceptor_ronda(
-                    page=page,
-                    tournament_id=tournament_id,
-                    season_id=season_id,
-                    ronda=ronda_objetivo,
-                )
-
-                try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                    random_sleep(settings['delay_min_seconds'], settings['delay_max_seconds'])
-
-                    logging.info("Buscando y cerrando banners de cookies/publicidad...")
-
-                    # 2. Seleccionar la ronda en el combobox (dispara el XHR /events/round/{ronda})
-                    try:
-                        logging.info("Localizando el combobox de Rondas en el DOM...")
-                        random_sleep(settings['delay_min_seconds'], settings['delay_max_seconds'])
-
-                        btn_ronda = page.get_by_role("combobox", name="Select item in event list")
-                        btn_ronda.wait_for(state="visible", timeout=15000)
-                        logging.info("Combobox 'btn_ronda' localizado.")
-
-                        nombre_ronda_buscar = f"Round {ronda_objetivo}"
-                        logging.info(f"Verificando si la opción '{nombre_ronda_buscar}' está visible...")
-
-                        if not page.get_by_role("option", name=nombre_ronda_buscar, exact=True).is_visible():
-                            logging.info("Desplegando el menú de rondas...")
-                            btn_ronda.click()
-                            random_sleep(settings['delay_min_seconds'], settings['delay_max_seconds'])
-
-                        logging.info(f"Haciendo click en '{nombre_ronda_buscar}'...")
-                        page.get_by_role("option", name=nombre_ronda_buscar, exact=True).click()
-                        logging.info(f"Filtro '{nombre_ronda_buscar}' aplicado. Esperando que carguen los partidos...")
-
-                        random_sleep(settings['delay_min_seconds'], settings['delay_max_seconds'])
-
-                    except Exception as e:
-                        logging.error(f"Fallo durante la interacción con el menú de Rondas: {e}")
-                        logging.info("Saltando a la siguiente temporada...")
-                        continue
-
-                    # 3. Guardar el JSON de la ronda interceptado en data/raw/league_events/
-                    nombre_archivo_ronda = (
-                        f"round_events_{pais_slug}_{liga_slug}_{temp_slug}_ronda_{ronda_objetivo}.json"
+                cargar_base = True
+                for ronda in rondas:
+                    page = listener = None
+                    endpoint = (
+                        f"/api/v1/unique-tournament/{tournament_id}"
+                        f"/season/{season_id}/events/round/{ronda}"
                     )
-                    ruta_eventos_ronda = os.path.join(raw_league_events_dir, nombre_archivo_ronda)
-
-                    guardar_eventos_ronda(
-                        page=page,
-                        captura=captura_ronda,
-                        ronda=ronda_objetivo,
-                        ruta_salida=ruta_eventos_ronda,
-                    )
-
-                    # 4. Extraer enlaces de partidos desde el DOM
                     try:
-                        logging.info("Buscando enlaces de partidos dentro del contenedor de la ronda...")
-                        contenedor_ronda = page.locator('#tabpanel-round')
-                        enlaces_elementos = contenedor_ronda.locator('a[href*="/match/"]').all()
-
-                        if not enlaces_elementos:
-                            logging.warning("No se encontró el contenedor '#tabpanel-round', buscando de forma acotada...")
-                            enlaces_elementos = page.locator(
-                                'div[class*="unique-tournament"] ~ a[href*="/match/"], a.d_block[href*="/match/"]'
-                            ).all()
-
-                        if not enlaces_elementos:
-                            logging.warning("No se encontraron elementos de partidos válidos.")
-                            continue
-
-                        urls_extraidas = []
-                        for elemento in enlaces_elementos:
-                            href = elemento.get_attribute('href')
-                            if href and "/match/" in href:
-                                link_completo = f"https://www.sofascore.com{href}" if href.startswith('/') else href
-                                if link_completo not in urls_extraidas:
-                                    urls_extraidas.append(link_completo)
-
-                        logging.info(
-                            f"Extracción finalizada con éxito. {len(urls_extraidas)} enlaces únicos de partidos capturados."
+                        page, nueva = cliente.get_page()
+                        capturas, listener = registrar_captura(
+                            page, {"events": (endpoint, eventos_validos)}
                         )
-
-                    except Exception as e:
-                        logging.error(f"Fallo al extraer los enlaces del DOM: {e}")
-                        continue
-
-                    try:
-                        if urls_extraidas:
-                            logging.info("Escribiendo datos en archivo JSON...")
-                            urls_unicas = list(set(urls_extraidas))
-                            temporada_limpia = season['year'].replace("/", "-")
-
-                            nombre_archivo = (
-                                f"urls_{country}_{league_name_url}_{temporada_limpia}_ronda_{ronda_objetivo}.json"
+                        if cargar_base or nueva:
+                            cargar_base = True
+                            page.goto(
+                                url_base, wait_until="domcontentloaded", timeout=60000
                             )
-                            ruta_archivo = os.path.join(data_dir, nombre_archivo)
-
-                            datos_a_guardar = {
-                                "liga": league['name'],
-                                "pais": country,
-                                "temporada": season['year'],
-                                "ronda": ronda_objetivo,
-                                "urls": urls_unicas
-                            }
-
-                            with open(ruta_archivo, 'w', encoding='utf-8') as f:
-                                json.dump(datos_a_guardar, f, indent=4, ensure_ascii=False)
-
-                            logging.info(f"Guardado correctamente en: {ruta_archivo}")
-                        else:
-                            logging.warning(f"No se encontraron URLs para guardar en la Ronda {ronda_objetivo}.")
-
-                    except Exception as e:
-                        logging.error(f"Fallo al intentar guardar el archivo JSON: {e}")
-
-                finally:
-                    # 5. Limpiar siempre el listener al salir de la temporada
-                    page.remove_listener("response", listener_ronda)
-
-        logging.info("Script Explorador finalizado. Cerrando navegador.")
-        browser.close()
+                            cargar_base = False
+                            random_sleep(
+                                settings["delay_min_seconds"],
+                                settings["delay_max_seconds"],
+                            )
+                        try:
+                            _seleccionar_ronda(page, ronda)
+                        except Exception as error:
+                            logging.warning(
+                                "Ronda %s: selector no disponible: %s", ronda, error
+                            )
+                        esperar_capturas(page, capturas, ["events"])
+                        datos = capturas.get("events")
+                        if datos is None:
+                            datos = fetch_json(page, endpoint)
+                        if not eventos_validos(datos):
+                            raise ValueError("La respuesta requiere una lista 'events'.")
+                        sufijo = f"{pais}_{liga}_{temp}_ronda_{ronda}.json"
+                        guardar_json_atomico(
+                            datos,
+                            Path(raw_league_events_dir) / f"round_events_{sufijo}",
+                        )
+                        urls = construir_urls_eventos(datos)
+                        guardar_json_atomico({
+                            "liga": league["name"], "pais": pais,
+                            "temporada": season["year"], "ronda": ronda, "urls": urls,
+                        }, Path(data_dir) / f"urls_{sufijo}")
+                        logging.info(
+                            "%s %s ronda %s: %s URLs guardadas.",
+                            liga, temp, ronda, len(urls),
+                        )
+                    except Exception as error:
+                        logging.error("%s %s ronda %s: %s", liga, temp, ronda, error)
+                    finally:
+                        if listener is not None:
+                            retirar_captura(page, listener)
+                        cliente.finish_unit()
+                    random_sleep(
+                        settings["delay_min_seconds"], settings["delay_max_seconds"]
+                    )
