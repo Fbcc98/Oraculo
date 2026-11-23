@@ -1,4 +1,6 @@
-"""Normalizacion de los JSON almacenados en ``data/matchs_stats``."""
+"""Normalización de eventos de ronda y estadísticas en ``data/raw``."""
+
+import logging
 
 from etl.common import Common
 
@@ -178,36 +180,44 @@ class MatchProcessor:
             "id_equipo_visita": away_team_id,
         }
 
-    def procesar_eventos_total(self, json_data, id_liga, ronda=None, urls=None):
-        """Deduplica y normaliza los eventos finalizados de team-events/total."""
-        raiz = (json_data or {}).get("tournamentTeamEvents")
-        if not isinstance(raiz, dict):
-            raise ValueError("El JSON no contiene tournamentTeamEvents")
+    def procesar_eventos_ronda(self, json_data, id_liga, ronda=None, urls=None):
+        """Normaliza la lista ``events`` de ``round_events_*.json`` sin estado.
 
-        eventos_unicos = {}
-        for grupo in raiz.values():
-            if not isinstance(grupo, dict):
-                continue
-            for eventos_equipo in grupo.values():
-                if not isinstance(eventos_equipo, list):
-                    continue
-                for evento in eventos_equipo:
-                    if not isinstance(evento, dict):
-                        continue
-                    event_id = Common.entero(evento.get("id"))
-                    if event_id is not None:
-                        eventos_unicos.setdefault(event_id, evento)
+        Conserva la primera aparición finalizada por ID que cumple el filtro.
+        La ronda solo se compara cuando el evento informa ``roundInfo.round``.
+        """
+        eventos = json_data.get("events") if isinstance(json_data, dict) else None
+        if not isinstance(eventos, list):
+            raise ValueError("El JSON debe contener una lista events")
 
         ronda_objetivo = Common.entero(ronda)
+        if ronda is not None and ronda_objetivo is None:
+            raise ValueError(f"Ronda inválida: {ronda!r}")
         urls = urls or {}
+        eventos_vistos = set()
         normalizados = []
-        for event_id, evento in eventos_unicos.items():
+        for evento in eventos:
+            if not isinstance(evento, dict):
+                logging.warning(
+                    "Entrada de events omitida en ronda %s: no es un objeto", ronda
+                )
+                continue
             if (evento.get("status") or {}).get("type") != "finished":
                 continue
-            event_round = Common.entero(
-                (evento.get("roundInfo") or {}).get("round")
-            )
-            if ronda_objetivo is not None and event_round != ronda_objetivo:
+            event_round = (evento.get("roundInfo") or {}).get("round")
+            if (
+                ronda_objetivo is not None
+                and event_round is not None
+                and Common.entero(event_round) != ronda_objetivo
+            ):
+                continue
+            event_id = Common.entero(evento.get("id"))
+            if event_id is None:
+                logging.warning(
+                    "Evento omitido en ronda %s: falta event.id válido", ronda
+                )
+                continue
+            if event_id in eventos_vistos:
                 continue
             normalizados.append(
                 self.procesar_evento(
@@ -216,6 +226,7 @@ class MatchProcessor:
                     url=urls.get(event_id),
                 )
             )
+            eventos_vistos.add(event_id)
         return normalizados
 
     @staticmethod
