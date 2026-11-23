@@ -81,19 +81,21 @@ def _buscar_archivo_partido(carpeta, partido_id, ronda=None):
 
 
 def _extraer_metadatos_competicion(eventos_json, nombre_archivo_eventos):
-    """Extrae los diccionarios maestros PAIS y LIGAS desde team_events_total."""
-    raiz = (eventos_json or {}).get("tournamentTeamEvents") or {}
-    primer_evento = None
-
-    for grupo in raiz.values():
-        if not isinstance(grupo, dict):
-            continue
-        for lista_eventos in grupo.values():
-            if isinstance(lista_eventos, list) and lista_eventos:
-                primer_evento = lista_eventos[0]
-                break
-        if primer_evento:
-            break
+    """Extrae PAIS y LIGAS del primer evento con torneo en round_events."""
+    eventos = (eventos_json or {}).get("events") or []
+    if not isinstance(eventos, list):
+        raise PipelineError(
+            f"El archivo {nombre_archivo_eventos} debe contener una lista events."
+        )
+    primer_evento = next(
+        (
+            evento for evento in eventos
+            if isinstance(evento, dict)
+            and isinstance(evento.get("tournament"), dict)
+            and evento["tournament"]
+        ),
+        None,
+    )
 
     if not primer_evento:
         raise PipelineError(
@@ -135,7 +137,7 @@ def _extraer_metadatos_competicion(eventos_json, nombre_archivo_eventos):
 
 def _mapa_urls_ronda(nombre_archivo_eventos):
     """Carga el mapa {partido_id: url} si existe el archivo de URLs homólogo."""
-    nombre_urls = nombre_archivo_eventos.replace("team_events_total_", "urls_", 1)
+    nombre_urls = nombre_archivo_eventos.replace("round_events_", "urls_", 1)
     ruta_urls = os.path.join(URLS_DIR, nombre_urls)
     if not os.path.exists(ruta_urls):
         return {}
@@ -172,7 +174,7 @@ def ejecutar_etl_desde_eventos(nombre_archivo_eventos, ronda_filtro=None):
     mapa_urls = _mapa_urls_ronda(nombre_archivo_eventos)
 
     match_processor = MatchProcessor()
-    eventos_normalizados = match_processor.procesar_eventos_total(
+    eventos_normalizados = match_processor.procesar_eventos_ronda(
         eventos_json,
         id_liga=liga["Id_liga"],
         ronda=ronda_filtro,
@@ -235,9 +237,11 @@ def ejecutar_etl_desde_eventos(nombre_archivo_eventos, ronda_filtro=None):
         )
 
     if not casos:
-        print(
-            "\nNo hay partidos con estadísticas descargadas listos para cargar. "
-            "Ejecuta primero el Scraper (Etapa 2)."
+        logging.warning(
+            "Ronda %s: %s partidos omitidos por falta de estadísticas. "
+            "Ejecuta primero el Scraper (Etapa 2).",
+            ronda_filtro,
+            sin_estadisticas,
         )
         return
 
@@ -278,7 +282,7 @@ def ejecutar_flujo_completo():
             temp_slug = normalizar_nombre_directorio(season["year"])
             archivo_urls = f"urls_{pais_slug}_{liga_slug}_{temp_slug}_ronda_{ronda}.json"
             archivo_eventos = (
-                f"team_events_total_{pais_slug}_{liga_slug}_{temp_slug}_ronda_{ronda}.json"
+                f"round_events_{pais_slug}_{liga_slug}_{temp_slug}_ronda_{ronda}.json"
             )
 
             if os.path.exists(os.path.join(URLS_DIR, archivo_urls)):
