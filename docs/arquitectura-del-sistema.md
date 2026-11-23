@@ -44,7 +44,10 @@ oraculo_project/
 │
 ├── scrapers/                    # Área 1: Extracción de datos (Web Scraping + Interceptación XHR)
 │   ├── match_crawler.py         # Descubre URLs de partidos por ronda e intercepta JSON de eventos de jornada.
-│   └── stats_scraper.py         # Extrae alineaciones, entrenadores y estadísticas por partido.
+│   ├── stats_scraper.py         # Descarga granular validada, filtrado y reporte por partido.
+│   ├── browser_client.py        # Chromium compartido, overlays, XHR, fetch y reciclaje.
+│   ├── artifact_store.py        # Contratos JSON, escritura atómica y auditoría sin navegador.
+│   └── test_resiliencia.py      # Verificaciones offline con artefactos temporales.
 │
 ├── etl/                         # Área 2: Transformación y Carga Transaccional
 │   ├── pipeline.py              # Coordina validaciones, procesadores y carga transaccional.
@@ -141,12 +144,19 @@ flowchart TD
    * `2`: **Solo ETL** (`ejecutar_etl_desde_eventos()`): Permite seleccionar un archivo de `../data/raw/league_events` y carga sus partidos en SQLite.
    * `3`: **Solo Scraping — Etapa 1**: Ejecuta `run_url_explorer()`.
    * `4`: **Solo Scraping — Etapa 2**: Ejecuta `procesar_archivo_ronda()` sobre un archivo elegido de `urls_league_rounds/`.
-   * `5`: **Diagnóstico y Base de Datos** (`menu_diagnostico()`): Submenú para auditar esquemas JSON (`schema_explorer`), consultar conteo de filas por tabla en SQLite (`ver_estado_base_datos()`) o inicializar/verificar el esquema (`crear_base_datos()`).
+   * `5`: **Auditar / Reintentar partidos pendientes de Scraping**: Ejecuta `auditar_y_reintentar_pendientes()` sobre todos los índices `urls_*.json`.
+   * `6`: **Diagnóstico y Base de Datos** (`menu_diagnostico()`): Submenú para auditar esquemas JSON (`schema_explorer`), consultar conteo de filas por tabla en SQLite (`ver_estado_base_datos()`) o inicializar/verificar el esquema (`crear_base_datos()`).
 2. **Argumentos Directos CLI (`argparse`):**
-   * `python main.py --full`: Ejecuta el flujo completo para la ronda definida en `../config.json`.
+   * `python main.py --full`: Ejecuta el flujo completo para todas las rondas definidas en `../config.json`.
    * `python main.py --etl [ARCHIVO_EVENTOS]`: Carga un archivo específico de `league_events/` (o todos si se omite el nombre).
+   * `python main.py --retry-pending [ARCHIVO_URLS]`: Audita un índice de URLs (nombre o ruta) o todos si se omite; descarga únicamente los artefactos faltantes de los IDs finalizados incompletos. No ejecuta ETL.
    * `python main.py --init-db`: Inicializa o verifica las tablas de `../database/oraculo.db`.
    * `python main.py --status`: Imprime el conteo actual de registros de las 11 tablas en SQLite.
+
+#### Flujo multironda y auditoría de pendientes
+* `ejecutar_flujo_completo()` resuelve `scraping_settings.ronda_objetivo` con `parsear_rondas_objetivo`, ejecuta el crawler una vez y, por cada liga/temporada/ronda, ejecuta Etapa 2 y Etapa 3 (ETL). Consolida los pendientes con archivo de origen, ID, URL y artefactos faltantes; los errores de una jornada se registran sin detener las siguientes.
+* `auditar_y_reintentar_pendientes(archivo_urls=None, ejecutar_reintento=True)` comparte con el scraper la inspección de `artifact_store.py`: cruza el índice con su homólogo `round_events_*.json` y valida los tres archivos de cada partido. `ejecutar_reintento=False` realiza solo lectura, sin abrir Chromium ni SQLite.
+* Si existen pendientes, llama a `procesar_archivo_ronda(archivo, solo_ids=[...])` y vuelve a auditar el archivo para informar el estado final. Retorna `{"archivos": dict, "pendientes": list, "errores": list}`; los índices ilegibles se reportan como errores y no como jornadas completas.
 
 #### Procesamiento del Puente Raw $\rightarrow$ ETL (`ejecutar_etl_desde_eventos`)
 1. Lee el archivo `round_events_*.json` seleccionado (raíz `"events"`, una `list[dict]`) e infiere la `ronda_filtro` desde el nombre del archivo si no se pasa explícitamente. El flujo completo espera `round_events_{pais_slug}_{liga_slug}_{temp_slug}_ronda_{ronda}.json`.
@@ -165,7 +175,7 @@ flowchart TD
 
 ## 4. Detalle Técnico — Área 1: Scraping
 
-> **Nota de implementación:** Actualmente, los componentes de esta capa están implementados como **módulos procedimentales en Python** (conjuntos de funciones cohesivas) y no como clases orientadas a objetos (`class`). Su diseño respeta el principio de responsabilidad única separando el *descubrimiento* (`match_crawler.py`) de la *extracción profunda* (`stats_scraper.py`).
+La extracción separa descubrimiento (`match_crawler.py`), descarga por partido (`stats_scraper.py`), ciclo de vida del navegador (`browser_client.py`) y contratos/persistencia (`artifact_store.py`). Importar estos módulos no inicia Playwright, configura loggers ni crea directorios; `main.py` configura el logger compartido al ejecutar la CLI.
 
 ### Secuencia de Ejecución del Scraping
 
@@ -173,85 +183,83 @@ flowchart TD
 sequenceDiagram
     actor Usuario as main.py / CLI
     participant MC as match_crawler.py
-    participant Web as Sofascore (Chromium + XHR)
+    participant BC as browser_client.py
+    participant Web as Sofascore
     participant FS as data/raw/
     participant SS as stats_scraper.py
-
-    Usuario->>MC: run_url_explorer()
-    MC->>Web: Registra listener pasivo page.on("response")
-    MC->>Web: Navega a URL de Liga/Temporada y selecciona "Round N"
-    Web-->>MC: XHR /api/v1/.../events/round/N (200 OK)
-    MC->>FS: Guarda round_events_*_ronda_N.json
-    MC->>Web: Extrae hrefs de #tabpanel-round
-    MC->>FS: Guarda urls_*_ronda_N.json
-
-    Usuario->>SS: procesar_archivo_ronda(archivo_urls)
-    SS->>FS: Lee lista de URLs de partidos
-    loop Por cada partido en la ronda
-        SS->>Web: Navega a URL del partido (#id:partido_id)
-        SS->>Web: Clic en pestañas + Intercepta /lineups y /managers (o Fallback API)
-        SS->>FS: Guarda lineups_*.json y managers_*.json
-        SS->>Web: Clic en "tab-statistics" + Intercepta /statistics
-        SS->>FS: Guarda stats_*.json
+    Usuario->>MC: run_url_explorer(rondas_override=None)
+    loop Por temporada y bloque de rondas
+        MC->>BC: Registrar listener antes de navegar/interactuar
+        BC->>Web: Abrir temporada una vez por sesión
+        loop Por ronda
+            MC->>Web: Seleccionar Round N con clic defensivo
+            Web-->>MC: XHR events/round/N o fetch same-origin
+            MC->>FS: Validar events y guardar round_events
+            MC->>FS: Construir URLs desde events y guardar urls
+        end
     end
+    Usuario->>SS: procesar_archivo_ronda(archivo, solo_ids=None)
+    SS->>FS: Filtrar finished y auditar JSON existentes
+    loop Por partido con artefactos faltantes
+        SS->>BC: Registrar listeners antes de goto
+        BC->>Web: Abrir partido y activar pestañas necesarias
+        Web-->>SS: XHR o fetch same-origin por recurso faltante
+        SS->>FS: Validar y guardar únicamente artefactos faltantes
+    end
+    SS-->>Usuario: Resumen de completos, omisiones y pendientes
 ```
 
 ### 4.1 Módulo `scrapers/match_crawler.py`
-* **Responsabilidad Principal:** Actuar como el explorador inicial de cada competición configurada. Intercepta desde el tráfico de red del navegador el JSON estructurado de la jornada objetivo (`/events/round/{ronda}`) y descubre las URLs de los partidos correspondientes.
-* **Punto de Entrada:** `run_url_explorer()`
 
-#### Criterios de Entrada (Inputs)
-* Archivo `../config.json`:
-  * `scraping_settings.ronda_objetivo` (`int`): Número de jornada a extraer.
-  * `scraping_settings.delay_min_seconds` / `delay_max_seconds` (`int`): Rango de pausa táctica entre acciones.
-  * `leagues` (`list[dict]`): Lista con `name`, `country`, `tournament_id` y `seasons` (`year`, `season_id`).
+* **Entradas públicas:** `normalizar_nombre_directorio(valor)` y `run_url_explorer(rondas_override=None)`.
+* Lee ligas/temporadas de `config.json`. El override, si se entrega, usa el mismo parser que `ronda_objetivo`: entero positivo, lista de enteros positivos, rango inclusivo (`"1-38"`) o lista CSV (`"1,3,5"`). Se conserva el orden sin duplicados.
+* Abre la URL de cada liga/temporada una vez y reutiliza la página entre rondas. Solo vuelve a abrir la base después de reciclar la sesión o si la navegación inicial falló.
+* Registra un listener pasivo sobre el **path exacto** `/api/v1/unique-tournament/{tournament_id}/season/{season_id}/events/round/{ronda}` antes de navegar o seleccionar `Round N` en el combobox. Así la ronda 1 no captura la respuesta de la ronda 10.
+* Los clics limpian overlays y pueden reintentarse con `force=True`. La captura dispone de una espera corta que bombea eventos; si la ronda estaba precargada o la interacción falla, utiliza `fetch` desde la página.
+* Valida `events` como lista antes de persistir. Una lista vacía es una ronda válida y genera también un índice vacío.
+* `construir_urls_eventos(datos)` construye directamente `https://www.sofascore.com/football/match/{slug}/{customId}#id:{id}` y deduplica por ID. **No raspa enlaces de `#tabpanel-round` ni de otro contenedor HTML.** Eventos sin ID, slug o customId válido se omiten con advertencia; el JSON de eventos conserva el payload original.
+* Limpia cada listener en `finally`, aísla errores por ronda y recicla el navegador cada `browser_recycle_rounds` unidades (5 por defecto).
 
-#### Procesamiento Interno
-1. Inicia una instancia visible de Chromium mediante `sync_playwright()`.
-2. Itera sobre cada liga y temporada configurada, registrando **antes de navegar** el listener pasivo `crear_interceptor_ronda(page, tournament_id, season_id, ronda_objetivo)` sobre `/api/v1/unique-tournament/{tournament_id}/season/{season_id}/events/round/{ronda}`.
-3. Navega a `https://www.sofascore.com/tournament/football/{country}/{league}/{tournament_id}#id:{season_id}`, localiza el selector de rondas (`combobox`) y selecciona `"Round {ronda_objetivo}"` (cubriendo tanto respuestas disparadas por el clic como respuestas precargadas en caché al abrir la temporada).
-4. **Persistencia con espera activa (`guardar_eventos_ronda`):** Sondea el estado de captura cada `250 ms` (hasta `12000 ms`) para evitar condiciones de carrera con la red y persiste el payload JSON cuando contiene la clave `"events"`.
-5. **Descubrimiento en el DOM:** Extrae todos los enlaces únicos que contengan `/match/` dentro de `#tabpanel-round` (con selectores de respaldo).
+**Salidas por liga/temporada/ronda:**
 
-#### Criterios de Salida (Outputs)
-Genera dos artefactos JSON en disco por cada combinación válida de liga, temporada y ronda:
-1. **Instantánea de eventos de la ronda:**
-   * **Ruta:** `data/raw/league_events/round_events_{country}_{league}_{season}_ronda_{ronda}.json`
-   * **Estructura:** Respuesta JSON cruda con la llave raíz `"events"` (lista de encuentros de la jornada con equipos, marcadores, estado y `startTimestamp` UTC) y `"hasNextPage"`.
-2. **Índice de URLs de la ronda:**
-   * **Ruta:** `data/raw/urls_league_rounds/urls_{country}_{league}_{season}_ronda_{ronda}.json`
-   * **Estructura:** Diccionario con metadatos (`liga`, `pais`, `temporada`, `ronda`) y la lista deduplicada `urls` (`list[str]`).
-
-#### Gestión de Errores y Resiliencia
-* **Aislamiento por temporada (`try / finally`):** Garantiza que `page.remove_listener("response", listener_ronda)` se ejecute siempre al salir de cada temporada para evitar acumulación de listeners entre iteraciones.
-* **Fallo en carga de página o interacción con el menú de rondas:** Captura la excepción, registra el error en el logger y ejecuta `continue` para saltar a la siguiente temporada sin abortar el lote completo.
+| Archivo | Contrato |
+| :--- | :--- |
+| `data/raw/league_events/round_events_{pais}_{liga}_{temp}_ronda_{ronda}.json` | JSON crudo con `events: list`, incluyendo metadatos adicionales de la respuesta. |
+| `data/raw/urls_league_rounds/urls_{pais}_{liga}_{temp}_ronda_{ronda}.json` | `liga`, `pais`, `temporada`, `ronda` y `urls: list[str]`. |
 
 ### 4.2 Módulo `scrapers/stats_scraper.py`
 
-* **Responsabilidad Principal:** Consumir los archivos de URLs generados por el crawler, visitar cada encuentro individual y extraer tres bloques de información cruda: alineaciones/jugadores, directores técnicos y estadísticas colectivas del equipo.
-* **Punto de Entrada:** `procesar_archivo_ronda(nombre_archivo_json: str)`
+**Punto de entrada:** `procesar_archivo_ronda(nombre_archivo_json, solo_ids=None)`.
 
-#### Criterios de Entrada (Inputs)
-* `nombre_archivo_json` (`str`): Nombre del archivo ubicado en `../data/raw/urls_league_rounds` (ej. `urls_england_premier-league_25-26_ronda_3.json`).
-* Archivo `../config.json`:
-  * `scraping_settings.user_agent_default` (`str`).
-  * `scraping_settings.delay_min_match` / `delay_max_match` (`int`).
+1. Lee el índice y deduplica por ID; `solo_ids` restringe la selección antes de encolar. Si existe el homólogo de eventos, admite únicamente `status.type == "finished"`; los partidos futuros, cancelados, aplazados o ausentes del homólogo quedan omitidos. Si no existe el homólogo, procesa las URLs con advertencia. Un homólogo corrupto aborta esa jornada antes de navegar para no ignorar el filtro silenciosamente.
+2. Inspecciona individualmente `stats`, `lineups` y `managers`. Si los tres son válidos, registra la omisión y no navega. Si no hay pendientes, tampoco inicia Playwright.
+3. Registra listeners pasivos para los recursos faltantes **antes de `page.goto(url)`**; alterna pestañas cuando hace falta. No usa `expect_response` ni `page.request.get`. Un timeout de navegación no descarta respuestas ya recibidas.
+4. Para cada recurso que siga faltando, ejecuta `fetch` same-origin hacia `/api/v1/event/{partido_id}/{statistics|lineups|managers}`. Valida cada respuesta antes de escribir y preserva los archivos válidos existentes. Los recursos automáticos del sitio pueden llegar igualmente; el scraper solo captura, consulta expresamente y guarda los necesarios.
+5. Aísla fallos por recurso y partido. Usa `delay_min_match` / `delay_max_match` entre encuentros; recicla después de `browser_recycle_matches` partidos intentados (50 por defecto).
+6. El circuit breaker cuenta partidos consecutivos con **cero artefactos guardados**. Al alcanzar `circuit_breaker_threshold` (3 por defecto, mínimo 3), cierra el navegador, aplica una pausa de `cooldown_min_seconds` a `cooldown_max_seconds` (60–90 por defecto) y reinicia el contador. Una descarga parcial reinicia esa racha.
 
-#### Procesamiento Interno (Estrategia Híbrida)
-Para cada URL en `datos_ronda["urls"]`, extrae el `partido_id` desde el fragmento `#id:{partido_id}` y ejecuta tres extracciones independientes:
-1. **Alineaciones y Estadísticas de Jugador (`obtener_lineups`):** Fuerza la recarga de red haciendo clic en `tab-2` (*Player Stats*) y regresando a `tab-1` (*Lineups*) mientras escucha con `page.expect_response` el endpoint `/api/v1/event/{partido_id}/lineups`. Si ocurre un timeout o fallo de interfaz, activa un **mecanismo de respaldo (fallback)** consultando directamente el endpoint vía `page.request.get`.
-2. **Entrenadores (`obtener_lineups_y_managers`):** Registra un listener pasivo (`page.on("response")`) durante la carga de alineaciones para capturar `/api/v1/event/{partido_id}/managers`. Si no se dispara en red, ejecuta el fallback directo al endpoint.
-3. **Estadísticas de Equipo (`obtener_estadisticas_equipo`):** Localiza `button[data-testid="tab-statistics"]`, hace clic e intercepta mediante `page.expect_response` el endpoint `/api/v1/event/{partido_id}/statistics`.
+**Archivos y validación compartida (`artifact_store.py`):**
 
-#### Criterios de Salida (Outputs)
-Por cada partido procesado con éxito, persiste hasta tres archivos JSON crudos:
-1. **Alineaciones y jugadores:** `data/raw/players_stats/lineups_{liga}_R{ronda}_{partido_id}.json`
-2. **Directores técnicos:** `data/raw/managers/managers_{liga}_R{ronda}_{partido_id}.json`
-3. **Estadísticas colectivas:** `data/raw/matchs_stats/stats_{liga}_R{ronda}_{partido_id}.json`
+| Archivo | Condición de validez |
+| :--- | :--- |
+| `data/raw/matchs_stats/stats_{liga}_R{ronda}_{partido_id}.json` | Objeto JSON con `statistics` como lista no vacía. |
+| `data/raw/players_stats/lineups_{liga}_R{ronda}_{partido_id}.json` | Objeto JSON con `home` como diccionario no vacío. |
+| `data/raw/managers/managers_{liga}_R{ronda}_{partido_id}.json` | Objeto JSON con `homeManager` o `awayManager` como diccionario no vacío. |
 
-#### Gestión de Errores y Resiliencia
-* **Aislamiento por partido:** Si `page.goto()` falla por timeout, se registra el error y se salta al siguiente encuentro sin detener el lote.
-* **Desacoplamiento entre bloques:** La captura de `lineups/managers` y la de `estadísticas de equipo` están envueltas en bloques `try/except` separados; si un partido no tiene datos de entrenadores o alineaciones, el scraper igualmente intenta capturar y guardar sus estadísticas colectivas.
+El nombre de liga conserva el convenio de espacios sustituidos por `_`. Los archivos ilegibles, vacíos, con tipos incorrectos o sin la raíz esperada se consideran faltantes. La escritura usa un temporal en el mismo directorio y `os.replace`, evitando truncar el destino si falla la serialización. La validación es estructural, no verifica la cobertura deportiva de los datos.
+
+**Reporte de salida:** `{"total": int, "completos": int, "omitidos_existentes": int, "omitidos_no_finalizados": int, "incompletos": list[dict]}`. Cada incompleto contiene `partido_id` (cadena), `url` y `faltantes` (`stats`, `lineups`, `managers`). `total` cuenta IDs únicos seleccionados; los contadores son disjuntos: `completos` cuenta partidos completados en esta ejecución, mientras que los previamente válidos se cuentan en `omitidos_existentes`. El logger compartido emite el resumen y el detalle de pendientes tanto en consola como en `oraculo_scraper.log`.
+
+### 4.3 Módulo `scrapers/browser_client.py`
+
+* `BrowserClient` inicia Chromium bajo demanda con `headless=False`, `--start-maximized`, `--disable-blink-features=AutomationControlled` e `ignore_default_args=['--enable-automation']`. Crea el contexto con `no_viewport=True` **sin sobrescribir `user_agent`**, conservando coherencia con los client hints del navegador.
+* El administrador contextual cierra página/contexto/navegador incluso ante fallos; el reciclaje descarta cookies y crea una sesión nueva. No acumula listeners entre unidades.
+* Centraliza cierre de cookies, ocultamiento de overlays (incluido `#goog-content-pause-scrim`) y clic defensivo.
+* `fetch_json(page, endpoint)` evalúa `fetch` en `https://www.sofascore.com`, con `credentials: 'include'` y `Accept: application/json`. Restringe endpoints a rutas relativas `/api/v1/`, comprueba HTTP y acota la espera con `AbortController` (15 segundos). Este respaldo reduce los rechazos de las peticiones fuera del contexto del navegador; **no garantiza ausencia de 403 ni disponibilidad del sitio**. Los fallos se registran y quedan reintentables.
+
+### 4.4 Verificación sin datos productivos
+
+`python -m unittest scrapers.test_resiliencia -v` ejecuta pruebas con `tempfile.TemporaryDirectory`, sin navegar por Internet ni abrir SQLite. Cubre parser, URLs, estados, auditoría de JSON corruptos/vacíos, idempotencia, captura previa a navegación, fallback por recurso, reciclaje, circuit breaker y orquestación CLI con ETL simulado. La compilación de los módulos modificados se verifica con `python -m py_compile`. Estas pruebas no certifican los selectores ni la disponibilidad actual de Sofascore.
 
 ---
 
@@ -261,9 +269,10 @@ Estos módulos proveen infraestructura compartida para los flujos de producción
 
 | Módulo | Función / Punto de Entrada | Tipo | Entrada (Inputs) | Salida / Efecto (Outputs) | Responsabilidad |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `../utils/json_reader.py` | `load_config()` | Utilidad Runtime | Ninguno (resuelve `../config.json` en raíz) | `dict` con parámetros del sistema | Centraliza la lectura de configuración global desde cualquier subcarpeta. |
+| `../utils/json_reader.py` | `load_config(config_path=None)` | Utilidad Runtime | Ruta opcional; por defecto `../config.json` en raíz | `dict` con parámetros del sistema | Centraliza la lectura de configuración global desde cualquier subcarpeta. |
+| `../utils/json_reader.py` | `parsear_rondas_objetivo(valor)` | Utilidad Runtime | Entero, lista, rango inclusivo o CSV | Lista de enteros positivos sin duplicados; `ValueError` ante formato inválido | Unifica la interpretación multironda del crawler y el orquestador. |
 | `../utils/logger.py` | `setup_logger()` | Utilidad Runtime | Ninguno | Configura `logging` hacia consola (`stdout`) y `../oraculo_scraper.log` | Inicializa bitácoras estandarizadas evitando duplicar *handlers*. |
-| `../utils/base.py` | `random_sleep(min_s, max_s)` | Utilidad Runtime | `min_s: float`, `max_s: float` | Pausa síncrona (`time.sleep`) e impresión en consola | Simula tiempos de espera humanos para mitigar bloqueos anti-bot. |
+| `../utils/base.py` | `random_sleep(min_s, max_s)` | Utilidad Runtime | `min_s: float`, `max_s: float` | Pausa síncrona (`time.sleep`) y registro `logging.info` en consola/archivo | Simula tiempos de espera humanos para mitigar bloqueos anti-bot. |
 | `../utils/schema_explorer.py` | `main()` / `explorar_carpeta(carpeta)` | Herramienta CLI Dev | Argumento CLI opcional o menú interactivo sobre `data/raw/*` | Reporte en consola de rutas de campos, tipos de datos y llaves únicas | Audita la estructura real de los JSON crudos antes de construir o ajustar los procesadores ETL. |
 
 ---
@@ -578,3 +587,4 @@ Método de alto nivel `cargar_partido(paises, liga, equipos, partido, datos_matc
 | **1.0** | 2026-11-15 | Versión inicial detallando macro-áreas, módulos de scraping, clases ETL, DDL y orquestación CLI en `main.py`. |
 | **1.1** | 2026-11-22 | Actualización de `scrapers/match_crawler.py` (migración de `team_events_total_*.json` a `round_events_*.json` vía interceptor XHR) e incorporación de las decisiones técnicas (ADRs) e historial. |
 | **1.2** | 2026-11-22 | Adaptación del puente ETL en `main.py` y de `MatchProcessor` a `round_events_*.json` (`"events"`), construcción automática del contexto completo y cierre de la transición desde el formato legado. |
+| **1.3** | 2026-11-23 | Scraping multironda desde eventos sin raspado de enlaces DOM; navegador compartido con fetch same-origin, reciclaje y overlays; validación/idempotencia granular, filtrado finished, circuit breaker y reportes; auditoría y CLI `--retry-pending`; pruebas temporales offline. |
