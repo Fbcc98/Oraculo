@@ -20,6 +20,7 @@ raw_league_events_dir = BASE_DIR / "data" / "raw" / "league_events"
 def normalizar_nombre_directorio(valor):
     """Normaliza nombres usados en la jerarquía de datos crudos."""
     return str(valor).strip().lower().replace(" ", "-").replace("/", "-")
+1
 
 
 def construir_urls_eventos(datos):
