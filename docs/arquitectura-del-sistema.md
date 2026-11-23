@@ -27,7 +27,7 @@ flowchart LR
     SCR -->|JSONs Crudos| RAW[(data/raw/\nStaging Area)]
     RAW --> ETL[2. Pipeline ETL\nPython / SQLite]
     ETL -->|Transacciones ACID| DB[(oraculo.db\nSQLite)]
-    DB -.->|Lectura Histórica\nFase Futura| ML[3. Machine Learning\nml_models/]
+    DB -.->|Lectura Histórica\nFase Futura| ML[3. Machine Learning\nml_models]
 ```
 
 ---
@@ -93,7 +93,7 @@ flowchart TD
         SS[scrapers/stats_scraper.py]
     end
 
-    subgraph StorageRaw [Almacenamiento Crudo - data/raw/]
+    subgraph StorageRaw [Almacenamiento Crudo - data/raw]
         UrlsJSON[(urls_*.json)]
         EventsJSON[(round_events_*.json)]
         StatsJSON[(stats_*.json / lineups_*.json / managers_*.json)]
