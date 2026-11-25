@@ -1,6 +1,6 @@
 """Dataset prepartido H1: historia desplazada, targets y filtro por CV.
 
-Uso desde la raíz: python -m ml_models.features_h1
+Uso desde la raíz: python -m ml_models.h1.features
 La CLI muestra un resumen con umbrales ajustados en el primer 80 % temporal.
 La API no ajusta umbrales automáticamente: el consumidor entrega solo train a
 ajustar_umbrales_cv_h1 y reutiliza el resultado en validación/test.

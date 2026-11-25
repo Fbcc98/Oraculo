@@ -1,6 +1,6 @@
 """Pruebas H1 en memoria y humo de solo lectura sobre 869 encuentros.
 
-Ejecutar desde la raíz: python -m unittest ml_models.test_features_h1 -v
+Ejecutar desde la raíz: python -m unittest ml_models.h1.test_features -v
 """
 
 from contextlib import closing, contextmanager
@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from ml_models.analisis_volumen import conectar_solo_lectura
-from ml_models.features_h1 import (
+from ml_models.h1.features import (
     CONTEXTO,
     LINEAS,
     MERCADOS,
@@ -25,7 +25,7 @@ from ml_models.features_h1 import (
 )
 
 
-RAIZ = Path(__file__).resolve().parents[1]
+RAIZ = Path(__file__).resolve().parents[2]
 DB_PATH = RAIZ / "database" / "oraculo.db"
 
 
@@ -359,7 +359,7 @@ class FeaturesH1Test(unittest.TestCase):
                 yield conexion
 
         antes = huellas()
-        with patch("ml_models.features_h1.conectar_solo_lectura",
+        with patch("ml_models.h1.features.conectar_solo_lectura",
                    side_effect=conexion_verificada), patch(
             "ml_models.analisis_volumen.sqlite3.connect", wraps=sqlite3.connect
         ) as conectar:
