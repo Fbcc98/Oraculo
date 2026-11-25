@@ -26,7 +26,7 @@ El diseño y evolución del código se rigen por seis principios basados en la n
 * **Fronteras estrictas entre módulos:**
   * Ningún módulo en `scrapers/` debe importar `sqlite3` ni ejecutar consultas SQL.
   * Ninguna clase en `etl/` debe realizar peticiones HTTP ni interactuar con Playwright.
-  * El módulo futuro `ml_models/` leerá exclusivamente desde `database/oraculo.db` y nunca desde `data/raw/`.
+  * El módulo `ml_models/` lee exclusivamente desde `database/oraculo.db` en modo de solo lectura y nunca desde `data/raw/`.
 * **Logging centralizado:** Utilizar exclusivamente `utils/logger.py` (`oraculo_scraper.log` y salida estándar) en lugar de `print()` para eventos operativos, incluyendo siempre el ID del encuentro o la jornada en mensajes de advertencia y error.
 
 ### 2.2 Reglas para Generación de Código con IA
@@ -52,10 +52,11 @@ Toda rama temporal nace desde `developer` y debe corresponder exactamente a una 
 * **Regla de aislamiento por área:** Cada rama debe crear o modificar únicamente archivos pertenecientes a su área declarada (por ejemplo, una rama `scraping` solo modifica archivos en `scrapers/`), salvo la actualización correspondiente en `/docs`.
 
 ### 3.3 Estructura de Commits
-Los mensajes de *commit* deben ser concisos, descriptivos y comenzar con uno de los siguientes tres prefijos:
-* `Feat: <descripción>` — Cuando se incorpora una nueva funcionalidad o módulo (ej. `Feat: agregar puente raw a ETL y flags CLI en main.py`).
-* `Fix: <descripción>` — Cuando se corrige un error o se refactoriza un método existente (ej. `Fix: validar existencia de JSON antes de descargar partido`).
-* `Docs: <descripción>` — Cuando se crean o actualizan archivos de documentación (ej. `Docs: actualizar contratos del ETL en arquitectura-del-sistema.md`).
+Los mensajes de *commit* deben ser concisos, descriptivos e incluir obligatoriamente el ámbito del módulo entre paréntesis, seguido de dos puntos y un espacio. Se admite uno de los siguientes tres formatos:
+
+* `Feat(<modulo>): <descripción>` — Cuando se incorpora una nueva funcionalidad o módulo (ej. `Feat(ml_models): organizar subpaquete h1 de features`).
+* `Fix(<modulo>): <descripción>` — Cuando se corrige un error o se refactoriza un método existente (ej. `Fix(ml_models): corregir ruta de la base en prueba de humo`).
+* `Docs(<modulo>): <descripción>` — Cuando se crean o actualizan archivos de documentación (ej. `Docs(docs): documentar arquitectura ML y subpaquete h1`).
 
 ### 3.4 Pull Requests (Bitácora de Trazabilidad) y Checklist Pre-Merge
 Aunque el desarrollo es en solitario y no requiere aprobación de terceros, toda integración hacia `developer` se realiza mediante **Pull Request (PR)** para dejar un registro visual de los cambios y vincular el cierre del *Issue* (`Closes #N`).
@@ -75,7 +76,7 @@ Una vez validado un hito completo en `developer`, se realiza el *merge* de `deve
 Al tratarse de un sistema de uso personal y no comercial, la estrategia de pruebas evita la sobre-ingeniería (como *mocks* complejos de navegador) y se enfoca en dos niveles prácticos:
 * **Validación en ejecución real:** Todo cambio en `scrapers/` o `main.py` se considera válido cuando completa su ejecución de extremo a extremo sin excepciones no controladas y genera los artefactos esperados en `data/raw/` o SQLite.
 * **Pruebas automatizadas asistidas por IA:** Para lógica crítica de transformación (`etl/`) y persistencia (`database/`), se apoyará en la IA para generar scripts rápidos de verificación sobre casos borde (valores nulos, porcentajes, claves duplicadas).
-* **Protección de datos históricos:** Toda prueba experimental o automatizada debe ejecutarse contra una base de datos temporal (o en memoria `:memory:`), nunca directamente sobre la base de datos productiva `database/oraculo.db` sin respaldo previo.
+* **Protección de datos históricos:** Toda prueba experimental o automatizada debe ejecutarse contra una base de datos temporal (o en memoria `:memory:`), nunca directamente sobre la base de datos productiva `database/oraculo.db` sin respaldo previo, salvo la prueba de humo estrictamente de solo lectura descrita en la sección 4.3.
 
 ### 4.2 Matriz de Aceptación de SQLite (Carga Piloto)
 Las pruebas de persistencia se ejecutan sobre un archivo SQLite temporal inicializado con `database/crear_db.py`, verificando que `PRAGMA foreign_keys = ON` esté activo en la conexión real utilizada por `Loader`.
@@ -89,3 +90,19 @@ Las pruebas de persistencia se ejecutan sobre un archivo SQLite temporal inicial
 | Cargar dos veces el mismo encuentro (*idempotencia*) | Se conserva una única fila por clave primaria/compuesta y se actualizan los valores suministrados mediante `UPSERT`. |
 
 Estos cinco casos definen la aceptación técnica de la **carga piloto** y su ejecución exitosa habilita el cierre del hito correspondiente en GitHub Projects.
+
+### 4.3 Suite Unitaria de Machine Learning
+
+Desde la raíz del proyecto, usando el entorno con sus dependencias instaladas:
+
+```bash
+python -m unittest discover -s ml_models -v
+```
+
+El descubrimiento incluye `ml_models/test_analisis_volumen.py` (5 pruebas) y `ml_models/h1/test_features.py` (15 pruebas). Los archivos `__init__.py` de `ml_models/` y `ml_models/h1/` permiten organizar el paquete y descubrir sus pruebas. La aceptación de la instantánea actual exige 20 pruebas aprobadas, sin errores de importación ni omisiones cuando existe `database/oraculo.db`.
+
+* **Cero fuga temporal (RNF-07):** Cambiar estadísticas reales del partido `t` no altera sus features de entrada ni las de partidos anteriores; solo puede afectar encuentros posteriores. Toda ventana aplica `.shift(1)` dentro del grupo correspondiente, respetando liga y rol local/visita.
+* **Nulos y consistencia numérica:** Las ventanas insuficientes mantienen `NaN`; se verifican `min_periods`, `ddof=1`, CV con media cero, cruces entre rivales y targets con componentes ausentes. No se sustituyen ausencias por cero.
+* **Separación train/test:** Los cuantiles de `Match_CV_{M}` se ajustan exclusivamente en train y se aplican a test como umbrales fijos, sin recalcularlos ni modificar el DataFrame original.
+* **Aislamiento de datos:** Las transformaciones H1 usan DataFrames sintéticos y SQLite en memoria; las pruebas descriptivas usan SQLite temporal. Ninguna prueba escribe sobre la base productiva.
+* **Humo de solo lectura:** Si existe `database/oraculo.db`, se permite consultarla exclusivamente mediante la conexión centralizada de `analisis_volumen.py`. La prueba verifica URI `?mode=ro`, `PRAGMA query_only = ON`, 869 filas y 150 columnas sin duplicados, e igualdad de hash SHA-256, tamaño y fecha de modificación de la base y sus archivos auxiliares presentes antes/después. Si el archivo no existe, solo esta prueba se omite; las 869 filas corresponden a la instantánea de referencia, no a un límite del constructor.

@@ -7,7 +7,7 @@
 4. [Detalle Técnico — Área 1: Scraping](#4-detalle-técnico--área-1-scraping)
 5. [Módulos Transversales y Herramientas de Soporte](#5-módulos-transversales-y-herramientas-de-soporte)
 6. [Detalle Técnico — Área 2: ETL y Persistencia DDL](#6-detalle-técnico--área-2-etl-y-persistencia-ddl)
-7. [Detalle Técnico — Área 3: Machine Learning *(Visión Futura)*](#7-detalle-técnico--área-3-machine-learning-visión-futura)
+7. [Detalle Técnico — Área 3: Machine Learning](#7-detalle-técnico--área-3-machine-learning)
 8. [Registro de Decisiones de Arquitectura (ADRs) e Historial](#8-registro-de-decisiones-de-arquitectura-adrs-e-historial)
 
 ---
@@ -18,7 +18,7 @@ El sistema **Oráculo** está diseñado bajo una arquitectura modular desacoplad
 
 1. **Módulo de Extracción (Scraping):** Automatiza la navegación web y la captura de datos crudos desde la fuente deportiva (Sofascore), persistiendo respuestas JSON inmutables en disco (`../data/raw`).
 2. **Módulo de Procesamiento y Almacenamiento (ETL y DDL):** Lee los archivos JSON crudos, valida reglas de negocio, normaliza estructuras en diccionarios nativos de Python y carga la información mediante transacciones atómicas (`UPSERT`) respetando la integridad referencial en SQLite (`../database/oraculo.db`).
-3. **Módulo de Analítica Predictiva (Machine Learning - Fase Futura):** Consumirá exclusivamente la base de datos relacional consolidada para entrenar modelos probabilísticos (estadísticas de volumen como córneres, faltas y saques de banda) sin acoplarse a la lógica de extracción.
+3. **Módulo de Analítica (Machine Learning):** Consume exclusivamente la base de datos relacional consolidada para análisis descriptivo y construcción del dataset prepartido de H1 (consistencia y variabilidad histórica por equipo). Las utilidades transversales y los subpaquetes por hipótesis están separados; el entrenamiento de modelos probabilísticos sigue pendiente.
 
 ```mermaid
 flowchart LR
@@ -27,7 +27,7 @@ flowchart LR
     SCR -->|JSONs Crudos| RAW[(data/raw/\nStaging Area)]
     RAW --> ETL[2. Pipeline ETL\nPython / SQLite]
     ETL -->|Transacciones ACID| DB[(oraculo.db\nSQLite)]
-    DB -.->|Lectura Histórica\nFase Futura| ML[3. Machine Learning\nml_models]
+    DB -->|Solo lectura\nEDA y features H1| ML[3. Machine Learning\nml_models]
 ```
 
 ---
@@ -61,7 +61,15 @@ oraculo_project/
 │   ├── crear_db.py              # Script DDL (11 tablas, 5 índices, FKs y migración defensiva).
 │   └── oraculo.db               # Base de datos SQLite generada en ejecución.
 │
-├── ml_models/                   # Área 3: Modelos predictivos (Trabajo futuro)
+├── ml_models/                   # Área 3: Analítica descriptiva y features por hipótesis
+│   ├── __init__.py              # Paquete de Machine Learning.
+│   ├── analisis_volumen.py      # Conexión SQLite de solo lectura y utilidades descriptivas.
+│   ├── test_analisis_volumen.py # Pruebas de integridad analítica con SQLite temporal.
+│   ├── eda_mercados_volumen.ipynb # Exploración descriptiva de mercados de volumen.
+│   └── h1/                     # H1: consistencia y variabilidad histórica por equipo.
+│       ├── __init__.py          # Subpaquete de la hipótesis H1.
+│       ├── features.py          # Dataset prepartido, umbrales CV y elegibilidad.
+│       └── test_features.py     # Pruebas temporales, de nulos y de solo lectura.
 │
 ├── utils/                       # Utilidades transversales y diagnóstico
 │   ├── base.py                  # Pausas aleatorias (random_sleep) para scraping ético.
@@ -563,10 +571,60 @@ Método de alto nivel `cargar_partido(paises, liga, equipos, partido, datos_matc
 
 ---
 
-## 7. Detalle Técnico — Área 3: Machine Learning *(Visión Futura)*
+## 7. Detalle Técnico — Área 3: Machine Learning
 
-* **Estado:** Pendiente de inicio (bloqueado hasta completar la carga piloto y estabilizar el histórico en `../database/oraculo.db`).
-* **Principio de Diseño:** El módulo `../ml_models` operará como un consumidor de solo lectura sobre SQLite. Tendrá prohibido leer directamente archivos JSON de `../data/raw` para garantizar que tanto el entrenamiento como las predicciones pre-partido utilicen datos validados y normalizados por el pipeline ETL.
+### 7.1 Utilidades transversales y analítica descriptiva
+
+`ml_models/analisis_volumen.py` centraliza la conexión mediante `conectar_solo_lectura(raiz=None)`: resuelve `database/oraculo.db`, exige que exista, abre su URI con `?mode=ro`, activa `PRAGMA query_only = ON` y utiliza una transacción de lectura para mantener una instantánea consistente. Cierra la conexión al salir del contexto, incluso ante errores. No crea bases ni modifica SQLite.
+
+El mismo módulo ofrece auditoría de esquema, claves y cobertura, limpieza de métricas, totales por partido, estadísticos descriptivos, ranking de estabilidad, detección de atípicos, ajustes de conteos y correlaciones. `ml_models/eda_mercados_volumen.ipynb` organiza la exploración descriptiva. SQLite es la única fuente persistida: ML no consume archivos de `data/raw/`. Las transformaciones también aceptan DataFrames para pruebas en memoria.
+
+### 7.2 Subpaquete H1 y contratos públicos
+
+`ml_models/h1/features.py` construye el dataset para evaluar consistencia y variabilidad histórica en `Corners`, `Saques_de_banda`, `Faltas` y `Remates`, con contexto de `Posesion_balon` y `Goles_esperados_xG`. Reutiliza la conexión y limpieza de `analisis_volumen.py`; no entrena modelos ni guarda datasets.
+
+**`construir_dataset_h1(datos_equipo=None, raiz=None) -> pd.DataFrame`**
+
+* **Entrada:** Sin `datos_equipo`, lee SQLite cruzando `PARTIDOS`, `LIGAS`, `PARTIDOS_EQUIPOS`, `EQUIPOS` y estadísticas de período `ALL`. Conserva participantes sin estadísticas mediante `LEFT JOIN`. Alternativamente acepta un DataFrame equipo–partido–período con las columnas de `COLUMNAS_BASE`: metadatos del encuentro, identidad/nombre del equipo, `Condicion_local`, `Periodo`, los cuatro mercados y las dos métricas de contexto. `raiz` permite resolver la raíz para la lectura de SQLite.
+* **Validación:** Normaliza `2ND` a `2ST` y selecciona exclusivamente `ALL`. Exige un local y un visitante distintos con metadatos coherentes, sin claves duplicadas; rechaza fechas inválidas o simultáneas para un mismo equipo y liga. Las estadísticas ausentes o inválidas permanecen como `NaN`.
+* **Salida:** Una fila por encuentro, ordenada por `[Fecha_hora_utc, Id_partido]`, con 10 metadatos, 108 features históricas prefijadas `L_`/`V_`, 16 cruces (`Exp_{M}_general`, `Exp_{M}_rol`, `Diff_{M}_general`, `Match_CV_{M}`) y 16 targets al final: total y tres indicadores over por mercado. Los valores reales del encuentro se exponen únicamente como `target_`; si falta un componente del total, tanto el total como sus binarios son `NaN`. La instantánea de referencia genera 869 filas y 150 columnas sin duplicados. Esta función no ajusta umbrales ni añade elegibilidad.
+
+**`ajustar_umbrales_cv_h1(df_train: pd.DataFrame, percentil: float = 0.75) -> dict[str, float]`**
+
+* **Entrada:** Exclusivamente el subconjunto de entrenamiento, con las cuatro columnas `Match_CV_{M}`; `percentil` debe estar entre 0 y 1.
+* **Salida:** Diccionario `{mercado: umbral}` obtenido mediante el cuantil de cada CV, ignorando `NaN`. Un mercado sin observaciones válidas devuelve umbral `NaN`. El consumidor es responsable de separar temporalmente train antes de llamar a esta función.
+
+**`aplicar_filtro_elegibilidad_h1(df: pd.DataFrame, umbrales_cv: dict[str, float]) -> pd.DataFrame`**
+
+* **Entrada:** Dataset con `Match_CV_{M}` y diccionario de umbrales previamente ajustado en train, con una clave por mercado.
+* **Salida:** Copia del dataset con cuatro columnas booleanas `flag_elegible_h1_{M}`: `True` si el CV no es nulo y es menor o igual al umbral; `False` en caso contrario, incluido un umbral `NaN`. No elimina filas, modifica el original ni recalcula cuantiles; mantiene los targets al final. El dataset completo pasa de 150 a 154 columnas.
+
+### 7.3 Prevención de fuga de datos (RNF-07)
+
+La historia se ordena por `[Id_liga, Id_equipo, Fecha_hora_utc, Id_partido]`. Cada ventana aplica `.shift(1)` **dentro de su grupo** antes del rolling: las features del partido actual usan solo encuentros anteriores. `Id_liga` identifica una edición de liga, incluida su temporada, en el esquema vigente.
+
+| Cálculo | Agrupación | Ventana y mínimo de observaciones previas |
+| :--- | :--- | :--- |
+| Medias a favor, en contra y del total | `Id_liga`, `Id_equipo` | 5 con `min_periods=3`; 10 con `min_periods=5`. |
+| Medias por rol local/visita | `Id_liga`, `Id_equipo`, `Condicion_local` | 5 con `min_periods=3`. |
+| Desviaciones estándar a favor, en contra y del total | `Id_liga`, `Id_equipo` | 10 con `min_periods=5`, `ddof=1`. |
+| Medias de posesión y xG | `Id_liga`, `Id_equipo` | 10 con `min_periods=5`. |
+
+Si no se cumple `min_periods`, el resultado permanece `NaN`, nunca se imputa con cero. El CV divide la desviación del total por su media histórica; una media cero o nula produce `NaN`. `Match_CV_{M}` promedia los CV históricos del local y la visita. Los umbrales se ajustan únicamente en train y se reutilizan sin cambios en validación/test.
+
+Las ventanas permiten evaluación secuencial: un resultado ya observado puede informar un encuentro posterior dentro de test. No representan predicciones de todo un horizonte con historia congelada. Las columnas `target_` se excluyen de las entradas del modelo.
+
+### 7.4 Ejecución y validación
+
+Desde la raíz, con las dependencias del entorno del proyecto:
+
+```bash
+python -m ml_models.h1.features
+python -m unittest ml_models.h1.test_features -v
+python -m unittest discover -s ml_models -v
+```
+
+La CLI informa dimensiones, elegibilidad por mercado y una muestra de columnas clave. Ajusta los umbrales en el tramo inicial cercano al 80 % temporal, manteniendo juntos los partidos que comparten la fecha/hora de corte, y los aplica al resto sin reajuste. La suite completa contiene 20 pruebas (15 de H1 y 5 de analítica descriptiva); los criterios de aceptación se detallan en [Estándares y Pruebas](estandares-y-pruebas.md#43-suite-unitaria-de-machine-learning).
 
 ---
 
@@ -588,3 +646,4 @@ Método de alto nivel `cargar_partido(paises, liga, equipos, partido, datos_matc
 | **1.1** | 2026-11-22 | Actualización de `scrapers/match_crawler.py` (migración de `team_events_total_*.json` a `round_events_*.json` vía interceptor XHR) e incorporación de las decisiones técnicas (ADRs) e historial. |
 | **1.2** | 2026-11-22 | Adaptación del puente ETL en `main.py` y de `MatchProcessor` a `round_events_*.json` (`"events"`), construcción automática del contexto completo y cierre de la transición desde el formato legado. |
 | **1.3** | 2026-11-23 | Scraping multironda desde eventos sin raspado de enlaces DOM; navegador compartido con fetch same-origin, reciclaje y overlays; validación/idempotencia granular, filtrado finished, circuit breaker y reportes; auditoría y CLI `--retry-pending`; pruebas temporales offline. |
+| **1.4** | 2026-11-25 | Incorporación de la analítica descriptiva en `ml_models/analisis_volumen.py` y del subpaquete `ml_models/h1/`: contratos del dataset prepartido, conexión SQLite de solo lectura, prevención de fuga temporal RNF-07 y suite unitaria de ML. |
