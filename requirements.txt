@@ -1,1 +1,8 @@
 playwright
+pandas
+numpy
+scipy
+matplotlib
+seaborn
+jupyter
+ipykernel
