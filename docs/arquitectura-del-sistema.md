@@ -18,7 +18,7 @@ El sistema **Oráculo** está diseñado bajo una arquitectura modular desacoplad
 
 1. **Módulo de Extracción (Scraping):** Automatiza la navegación web y la captura de datos crudos desde la fuente deportiva (Sofascore), persistiendo respuestas JSON inmutables en disco (`../data/raw`).
 2. **Módulo de Procesamiento y Almacenamiento (ETL y DDL):** Lee los archivos JSON crudos, valida reglas de negocio, normaliza estructuras en diccionarios nativos de Python y carga la información mediante transacciones atómicas (`UPSERT`) respetando la integridad referencial en SQLite (`../database/oraculo.db`).
-3. **Módulo de Analítica (Machine Learning):** Consume exclusivamente la base de datos relacional consolidada para análisis descriptivo y construcción del dataset prepartido de H1 (consistencia y variabilidad histórica por equipo). Las utilidades transversales y los subpaquetes por hipótesis están separados; el entrenamiento de modelos probabilísticos sigue pendiente.
+3. **Módulo de Analítica (Machine Learning):** Consume exclusivamente la base de datos relacional consolidada para análisis descriptivo, construcción del dataset prepartido de H1 (consistencia y variabilidad histórica por equipo) y entrenamiento/evaluación temporal de sus modelos baseline Poisson y Binomial Negativa. Las utilidades transversales y los subpaquetes por hipótesis están separados.
 
 ```mermaid
 flowchart LR
@@ -69,7 +69,10 @@ oraculo_project/
 │   └── h1/                     # H1: consistencia y variabilidad histórica por equipo.
 │       ├── __init__.py          # Subpaquete de la hipótesis H1.
 │       ├── features.py          # Dataset prepartido, umbrales CV y elegibilidad.
-│       └── test_features.py     # Pruebas temporales, de nulos y de solo lectura.
+│       ├── test_features.py     # Pruebas temporales, de nulos y de solo lectura.
+│       ├── model.py             # Baseline de conteos, corte por temporada y métricas H1.
+│       ├── test_model.py        # Pruebas de ajuste, probabilidades y evaluación segmentada.
+│       └── baseline_h1.ipynb    # Resultados ejecutados, comparación H1 y calibración.
 │
 ├── utils/                       # Utilidades transversales y diagnóstico
 │   ├── base.py                  # Pausas aleatorias (random_sleep) para scraping ético.
@@ -620,11 +623,51 @@ Desde la raíz, con las dependencias del entorno del proyecto:
 
 ```bash
 python -m ml_models.h1.features
+python -m ml_models.h1.model
 python -m unittest ml_models.h1.test_features -v
+python -m unittest ml_models.h1.test_model -v
 python -m unittest discover -s ml_models -v
 ```
 
-La CLI informa dimensiones, elegibilidad por mercado y una muestra de columnas clave. Ajusta los umbrales en el tramo inicial cercano al 80 % temporal, manteniendo juntos los partidos que comparten la fecha/hora de corte, y los aplica al resto sin reajuste. La suite completa contiene 20 pruebas (15 de H1 y 5 de analítica descriptiva); los criterios de aceptación se detallan en [Estándares y Pruebas](estandares-y-pruebas.md#43-suite-unitaria-de-machine-learning).
+La CLI de features informa dimensiones, elegibilidad por mercado y una muestra de columnas clave. Ajusta los umbrales en el tramo inicial cercano al 80 % temporal, manteniendo juntos los partidos que comparten la fecha/hora de corte, y los aplica al resto sin reajuste. La CLI del modelo usa exclusivamente el corte por temporada descrito a continuación e imprime tamaños de muestra y tablas de validación/test promediadas sobre las tres líneas. La suite completa contiene 33 pruebas (15 de features H1, 13 del baseline y 5 de analítica descriptiva); los criterios de aceptación se detallan en [Estándares y Pruebas](estandares-y-pruebas.md#43-suite-unitaria-de-machine-learning).
+
+### 7.5 Baseline H1: contratos de `ml_models/h1/model.py`
+
+**Alcance y dependencias:** Modelos de conteo para `Corners`, `Saques_de_banda` y `Faltas`, período `ALL`. Reutiliza el dataset y los umbrales de `features.py`, y NumPy/pandas/SciPy del entorno del proyecto; no requiere instalar sklearn ni statsmodels. No configura handlers, guarda modelos ni escribe sobre SQLite. `Remates` conserva su flag del constructor de features, pero no se entrena ni evalúa en este baseline.
+
+**`dividir_temporalmente_h1(dataset=None, raiz=None) -> ParticionH1`**
+
+* Sin `dataset`, consume `construir_dataset_h1(raiz=raiz)` en solo lectura. Con un DataFrame, exige el contrato de salida de features. Copia la entrada y ordena por `[Fecha_hora_utc, Id_partido]`.
+* Devuelve `train` (`24/25`), `val` (`25/26`), `test` (`26/27`) y `umbrales_cv`. Rechaza temporadas desconocidas, fechas nulas/inválidas, IDs nulos/repetidos y splits ausentes. Comprueba explícitamente `max(train.fecha) < min(val.fecha)` y `max(val.fecha) < min(test.fecha)`; el rechazo de solapamientos permanece activo con Python optimizado.
+* Ajusta `ajustar_umbrales_cv_h1(train, percentil=0.75)` antes de filtrar nulos por mercado y llama a `aplicar_filtro_elegibilidad_h1` separadamente sobre cada split. Nunca recalcula los umbrales en validación/test.
+
+**`predictoras_h1(mercado) -> list[str]` y `preparar_mercado_h1(df, mercado) -> pd.DataFrame`**
+
+* Lista cerrada de ocho predictoras: `Exp_{M}_general`, `Exp_{M}_rol`, `Diff_{M}_general`, `Match_CV_{M}`, posesión media de diez partidos local/visita y xG medio de diez partidos local/visita. No utiliza ningún target como predictor.
+* Descarta únicamente filas con NaN en esas entradas o en `target_{M}_total`. Los nulos de otros mercados/columnas no afectan a la muestra. No imputa ni elimina atípicos; rechaza infinitos y targets negativos/fraccionarios. Train sin filas válidas provoca error explícito.
+
+**Modelos y ajuste:** `NaiveMedia`, `ModeloPoissonH1` y `ModeloBinomialNegativaH1` implementan `fit(X, y)`, `predict(X)` y `predict_proba_over(X, lineas)`. X es una matriz numérica finita en el orden de `predictoras_h1`; y contiene conteos enteros no negativos. `entrenar_modelos_h1(df_train, mercado)` prepara la muestra y devuelve un diccionario por nombre de modelo. El llamador debe entregar exclusivamente train.
+
+| Modelo | Estimación y distribución predictiva |
+| :--- | :--- |
+| `NaiveMedia` | Media de y sobre las filas válidas de train, compartidas con las regresiones; distribución Poisson. |
+| `Poisson` | GLM sin penalización con intercepto y enlace log. Máxima verosimilitud mediante BFGS y gradiente analítico en SciPy. |
+| `BinomialNegativa` | NB2, `Var(Y|X)=mu+alpha*mu²`; estima alpha por verosimilitud perfilada, optimizando beta para cada candidato. Compara con el límite Poisson. |
+
+Cada regresión guarda `escalador_` (`mean_`, `scale_`, `n_samples_seen_`), ajustado solo con las filas válidas de train. Usa desviación poblacional (`ddof=0`) y escala 1 en columnas constantes, equivalente numérico de StandardScaler. El intercepto se incorpora después del escalado. Ni predicción ni evaluación ajustan parámetros. La optimización es determinista y falla explícitamente si no converge; un gradiente residual máximo de `1e-5` admite la advertencia numérica de precisión de BFGS.
+
+`alpha_ = 0` representa el límite Poisson cuando no mejora la verosimilitud o alpha cae al umbral numérico `1e-6`; la búsqueda amplía el extremo superior hasta encerrar el mínimo. Train con targets todos cero usa la distribución degenerada en cero (límite de tasa cero), sin intentar estimar un intercepto logarítmico infinito. `probabilidades_over_h1(mu, lineas, alpha=0)` devuelve una matriz partido × línea mediante `SF(floor(L))`, equivalente estable a `1-CDF`. En NB usa `n=1/alpha`, `p=1/(1+alpha*mu)`; con alpha ≤ `1e-6` utiliza Poisson. Under es el complemento de over para las líneas semienteras.
+
+**`evaluar_modelo_h1(modelo, df, mercado, split) -> pd.DataFrame`**
+
+* `split`: `val_25_26` o `test_26_27`. Devuelve nueve filas por modelo/mercado/split: tres segmentos (`Todos`, `Elegibles_H1`, `No_elegibles_H1`) por tres líneas de `LINEAS_BINARIAS_H1`: Corners 9.5/10.5/11.5; Saques_de_banda 33.5/34.5/35.5; Faltas 21.5/22.5/23.5.
+* Columnas: `Split`, `Mercado`, `Modelo`, `Segmento`, `Linea`, `N_partidos`, `Cobertura_pct`, `MAE_conteo`, `RMSE_conteo`, `Accuracy`, `Log_Loss`, `Brier_Score`, `Tasa_real_over`. Cobertura usa como denominador todos los partidos válidos del mercado en el split; no todos los partidos crudos. Accuracy aplica `p >= 0.5`; solo Log Loss recorta probabilidades a `[1e-15, 1-1e-15]` para evitar logaritmos infinitos.
+* Segmentos vacíos tienen N=0, cobertura=0 y métricas NaN; si el split carece de filas válidas, la cobertura es también NaN (denominador cero). Los segmentos complementarios suman N de Todos y 100% de cobertura cuando existen filas válidas.
+* Los tres modelos se ajustan sobre la misma muestra completa de train. La comparación con/sin filtro cambia exclusivamente las filas evaluadas, sin reentrenar sobre elegibles.
+
+**`ejecutar_baseline_h1(dataset=None, raiz=None) -> ResultadoH1`** devuelve la partición, modelos por mercado, tabla de muestras antes/después de NaN con Var/Mean de train, y las 162 filas de métricas. `resumir_resultados_h1(tabla)` calcula medias macro de las tres líneas por split/mercado/modelo/segmento; no suma partidos repetidos entre líneas. La CLI imprime ese resumen.
+
+**Notebook ejecutado:** `ml_models/h1/baseline_h1.ipynb` conserva tablas completas por línea, resúmenes por temporada, diagnósticos de dispersión, contraste Todos/Elegibles, gráficos Accuracy/Brier y curvas de calibración con tamaños por intervalo. El ganador por mercado se selecciona por menor Brier macro de validación en Todos (desempate por nombre); test nunca selecciona ni recalibra modelos. Calibración usa la línea central por mercado y diez intervalos fijos de probabilidad. Guarda versiones del entorno y hash SHA-256 antes/después de SQLite. La instantánea contiene 380/380/109 partidos y 320/320/49 válidos por mercado; 26/27 es parcial. Los contrastes son descriptivos y las líneas de un mismo partido no son observaciones independientes.
 
 ---
 
@@ -647,3 +690,4 @@ La CLI informa dimensiones, elegibilidad por mercado y una muestra de columnas c
 | **1.2** | 2026-11-22 | Adaptación del puente ETL en `main.py` y de `MatchProcessor` a `round_events_*.json` (`"events"`), construcción automática del contexto completo y cierre de la transición desde el formato legado. |
 | **1.3** | 2026-11-23 | Scraping multironda desde eventos sin raspado de enlaces DOM; navegador compartido con fetch same-origin, reciclaje y overlays; validación/idempotencia granular, filtrado finished, circuit breaker y reportes; auditoría y CLI `--retry-pending`; pruebas temporales offline. |
 | **1.4** | 2026-11-25 | Incorporación de la analítica descriptiva en `ml_models/analisis_volumen.py` y del subpaquete `ml_models/h1/`: contratos del dataset prepartido, conexión SQLite de solo lectura, prevención de fuga temporal RNF-07 y suite unitaria de ML. |
+| **1.5** | 2026-11-26 | Baseline H1 Poisson/NB2 y referencia ingenua, partición estricta por temporadas, evaluación segmentada, notebook ejecutado y 13 pruebas adicionales. |
